@@ -76,7 +76,19 @@ class CarControllerParams:
 
     # STEER_MAX stays the high-speed value; the lookup only adds authority below its top
     # breakpoint. None on every platform that does not carry the flag.
-    self.STEER_MAX_LOOKUP = self.STEER_MAX_LOOKUP_DYNAMIC if CP.flags & HyundaiFlags.DYNAMIC_LIMITS else None
+    #
+    # The exclusions mirror panda's precedence exactly. hyundai.h picks
+    #   alt_limits_2 ? ALT_2 : alt_limits ? ALT : dynamic_limits ? DYNAMIC : STOCK
+    # and the CAN FD tx hook never consults hyundai_dynamic_limits at all. This assignment sits
+    # outside the if/elif chain above, so without the exclusions a platform carrying both
+    # DYNAMIC_LIMITS and ALT_LIMITS would keep STEER_MAX = 270 while commanding off a 409
+    # schedule -- panda would then reject every frame below 16 m/s, the stream to the MDPS
+    # stops, and the EPS faults mid-turn. No platform combines them today and
+    # test_no_conflicting_limit_flags keeps it that way; this makes the failure inert rather
+    # than dangerous if one ever does.
+    conflicting = HyundaiFlags.CANFD | HyundaiFlags.ALT_LIMITS | HyundaiFlags.ALT_LIMITS_2
+    use_dynamic = bool(CP.flags & HyundaiFlags.DYNAMIC_LIMITS) and not (CP.flags & conflicting)
+    self.STEER_MAX_LOOKUP = self.STEER_MAX_LOOKUP_DYNAMIC if use_dynamic else None
 
 
 class HyundaiSafetyFlags(IntFlag):

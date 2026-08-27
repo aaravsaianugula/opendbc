@@ -387,6 +387,30 @@ class TestHyundaiSafetyDynamicLimits(TestHyundaiSafety):
     self.assertFalse(self._tx(self._torque_cmd_msg(max(self.MAX_TORQUE_LOOKUP[1]))),
                      msg="a stale speed sample kept the raised ceiling open")
 
+  def test_no_conflicting_limit_flags(self):
+    # panda picks alt_limits_2 -> alt_limits -> dynamic_limits -> stock, and the CAN FD hook
+    # never consults dynamic_limits at all. A platform carrying DYNAMIC_LIMITS together with any
+    # of those would command off the 409 schedule while panda enforced 270, 170 or 270, and
+    # every frame below 16 m/s would be rejected. Nothing structural prevents the combination --
+    # STEER_MAX_LOOKUP is assigned outside the if/elif chain that picks STEER_MAX -- so assert it.
+    conflicting = HyundaiFlags.CANFD | HyundaiFlags.ALT_LIMITS | HyundaiFlags.ALT_LIMITS_2
+    for platform in CAR:
+      if platform.config.flags & HyundaiFlags.DYNAMIC_LIMITS:
+        self.assertFalse(platform.config.flags & conflicting,
+                         msg=f"{platform} combines DYNAMIC_LIMITS with a conflicting limit flag")
+
+  def test_lookup_is_none_on_every_other_platform(self):
+    # STEER_MAX_LOOKUP, not the platform flag, is what carcontroller multiplies by. Dropping the
+    # conditional that derives it would hand all 80 other Hyundai platforms a 409 low-speed gain
+    # -- including the ALT_LIMITS cars panda caps at 270 and the ALT_LIMITS_2 cars it caps at 170
+    # -- and every other test here would stay green, because they all read the class constant.
+    with_lookup = []
+    for platform in CAR:
+      CP = CarParams(carFingerprint=platform, flags=int(platform.config.flags))
+      if CarControllerParams(CP).STEER_MAX_LOOKUP is not None:
+        with_lookup.append(str(platform))
+    self.assertEqual(with_lookup, ["HYUNDAI_ELANTRA_2024"])
+
   def test_only_the_measured_platform_moves(self):
     # this raises a steering torque ceiling; it must not leak onto any other HKG platform
     dynamic = sorted(c for c in CAR if c.config.flags & HyundaiFlags.DYNAMIC_LIMITS)
