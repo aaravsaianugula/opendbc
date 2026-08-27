@@ -90,7 +90,11 @@ class HyundaiSafetyFlags(IntFlag):
   CANFD_LKA_STEER_MSG_ALT = 128
   FCEV_GAS = 256
   ALT_LIMITS_2 = 512
-  DYNAMIC_LIMITS = 1024
+  # 2048, not 1024: the community elantra-2024-port lineage -- which is what is actually
+  # installed on the car -- uses 1024 for LFAHDA_MFC_8, and HYUNDAI_ELANTRA_2024 sets it
+  # there. Landing this on that lineage with 1024 would make panda read an already-set
+  # flag as the opt-in to the raised ceiling. 2048 is free on both lineages.
+  DYNAMIC_LIMITS = 2048
 
 
 # Hyundai/Kia/Genesis SCC (Smart Cruise Control) and steering architecture:
