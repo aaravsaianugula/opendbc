@@ -176,8 +176,14 @@ class HyundaiFlags(IntFlag):
 
   ALT_LIMITS_2 = 2 ** 26
 
-  # this platform commands more steering torque at low speed, via STEER_MAX_LOOKUP_DYNAMIC
-  DYNAMIC_LIMITS = 2 ** 27
+  # this platform commands more steering torque at low speed, via STEER_MAX_LOOKUP_DYNAMIC.
+  # 2**28, not 2**27: the community elantra-2024-port lineage -- the one actually installed on
+  # the car -- uses 2**27 for HyundaiFlags.LFAHDA_MFC_8, and both HYUNDAI_ELANTRA_2024 and
+  # HYUNDAI_ELANTRA_HEV_2024 set it there. IntFlag does not reject a duplicate value, it makes
+  # the second member a silent alias of the first, so landing this on that lineage at 2**27
+  # would hand the Hybrid a 409-count ceiling nobody opted it into. guards.py now fails on any
+  # aliased flag in either enum.
+  DYNAMIC_LIMITS = 2 ** 28
 
 
 @dataclass
