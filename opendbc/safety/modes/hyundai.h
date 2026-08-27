@@ -482,11 +482,28 @@ static safety_config hyundai_legacy_init(uint16_t param) {
     HYUNDAI_SCC11_ADDR_CHECK(0)
   };
 
+  // safety_rx_hook only dispatches messages that are in the mode's rx_checks, so without this
+  // the LDA button is never seen and MADS cannot be toggled with it, as it can in hyundai_init
+  static RxCheck hyundai_legacy_lda_button_rx_checks[] = {
+    HYUNDAI_COMMON_RX_CHECKS(true)
+    HYUNDAI_SCC12_ADDR_CHECK(0)
+    HYUNDAI_SCC11_ADDR_CHECK(0)
+    HYUNDAI_LDA_BUTTON_ADDR_CHECK
+  };
+
   hyundai_common_init(param);
   hyundai_legacy = true;
   hyundai_longitudinal = false;
   hyundai_camera_scc = false;
-  return BUILD_SAFETY_CFG(hyundai_legacy_rx_checks, HYUNDAI_TX_MSGS);
+
+  safety_config ret;
+  SET_TX_MSGS(HYUNDAI_TX_MSGS, ret);
+  if (hyundai_has_lda_button) {
+    SET_RX_CHECKS(hyundai_legacy_lda_button_rx_checks, ret);
+  } else {
+    SET_RX_CHECKS(hyundai_legacy_rx_checks, ret);
+  }
+  return ret;
 }
 
 const safety_hooks hyundai_hooks = {
