@@ -3,7 +3,9 @@ from opendbc.testing import parameterized_class
 import random
 import unittest
 
-from opendbc.car.hyundai.values import HyundaiSafetyFlags
+import numpy as np
+
+from opendbc.car.hyundai.values import CAR, CarControllerParams, HyundaiFlags, HyundaiSafetyFlags
 from opendbc.car.structs import CarParams
 from opendbc.safety.tests.libsafety import libsafety_py
 import opendbc.safety.tests.common as common
@@ -264,6 +266,97 @@ class TestHyundaiSafetyAltLimits2(TestHyundaiSafety):
     self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
     self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, HyundaiSafetyFlags.ALT_LIMITS_2)
     self.safety.init_tests()
+
+
+@parameterized_class(LDA_BUTTON)
+class TestHyundaiSafetyDynamicLimits(TestHyundaiSafety):
+  """2024-25 Elantra (CN7): speed-scheduled steering torque.
+
+  Measured on comma's own fleet data for this platform (commaSteeringControl,
+  2.65M hands-off engaged samples): at STEER_MAX = 384 the car reaches a median 1.97 m/s^2
+  of lateral acceleration at full commanded torque below 7 m/s, while the planner asks for
+  2.34, so openpilot sits pinned at the ceiling and under-steers through tight turns. By
+  18 m/s, 384 already reaches 2.90. The extra authority exists to get closer to the lateral
+  acceleration the planner already asks for at low speed, not to exceed it anywhere.
+
+  The lookup is taken from CarControllerParams rather than written out again here, so the
+  opendbc gain and this panda ceiling cannot silently diverge -- the inherited
+  test_steer_safety_check and test_against_torque_driver then exercise panda against the
+  opendbc numbers across the whole speed range.
+  """
+  MAX_TORQUE_LOOKUP = CarControllerParams.STEER_MAX_LOOKUP_DYNAMIC
+  DYNAMIC_MAX_TORQUE = True
+
+  def setUp(self):
+    self.packer = CANPackerSafety("hyundai_can_generated")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, HyundaiSafetyFlags.DYNAMIC_LIMITS)
+    self.safety.init_tests()
+
+  def _reset_speed_measurement(self, speed):
+    # the shared dynamic-torque tests speak m/s; Hyundai's _speed_msg takes raw WHL_SPD counts
+    super()._reset_speed_measurement(speed * 3.6 / 0.03125)
+
+  def test_vehicle_speed_tracks_wheel_speed(self):
+    # the dynamic limit is only as trustworthy as the speed feeding it. Hyundai CAN did not
+    # populate vehicle_speed at all before this flag existed
+    for speed in (0.0, 5.0, 10.0, 20.0, 30.0):
+      self._reset_speed_measurement(speed)
+      self.assertAlmostEqual(self.safety.get_vehicle_speed_min(), speed, places=1,
+                             msg=f"vehicle_speed did not track wheel speed at {speed} m/s")
+
+  def test_more_torque_at_low_speed_than_high(self):
+    # the point of the change: more authority at intersection speed, unchanged on the highway
+    low, high = self._get_max_torque(5.0), self._get_max_torque(30.0)
+    self.assertGreater(low, high)
+    self.assertEqual(low, max(self.MAX_TORQUE_LOOKUP[1]))
+    # panda's ceiling on the highway is the static limit plus the shared +1 fudge in
+    # steer_torque_cmd_checks. What openpilot commands up there is still exactly 384.
+    self.assertEqual(high, min(self.MAX_TORQUE_LOOKUP[1]) + 1)
+
+  def test_torque_ceiling_follows_speed(self):
+    # walk the whole schedule and prove the ceiling moves with speed, in both directions
+    self.safety.set_controls_allowed(True)
+    self._reset_torque_driver_measurement(0)
+    for speed in (0.0, 2.0, 5.0, 8.0, 12.0, 16.0, 25.0, 35.0):
+      self._reset_speed_measurement(speed)
+      max_torque = self._get_max_torque(speed)
+      for sign in (-1, 1):
+        self._set_prev_torque(max_torque * sign)
+        self.assertTrue(self._tx(self._torque_cmd_msg(max_torque * sign)),
+                        msg=f"{max_torque * sign} was rejected at {speed} m/s")
+        self._set_prev_torque((max_torque + 1) * sign)
+        self.assertFalse(self._tx(self._torque_cmd_msg((max_torque + 1) * sign)),
+                         msg=f"{(max_torque + 1) * sign} was allowed at {speed} m/s")
+
+  def test_no_speed_measured_yet(self):
+    # vehicle_speed resets to 0 on safety mode init, which is the permissive end of the
+    # schedule. Nothing can be sent before cruise engages and the RX checks pass, but bound
+    # it rather than assume it: the limit is never more than the low-speed value.
+    self.safety.init_tests()
+    self.assertEqual(self.safety.get_vehicle_speed_min(), 0)
+
+    self.safety.set_controls_allowed(False)
+    self.assertFalse(self._tx(self._torque_cmd_msg(1)))
+
+    self.safety.set_controls_allowed(True)
+    self._reset_torque_driver_measurement(0)
+    max_torque = max(self.MAX_TORQUE_LOOKUP[1])
+    self._set_prev_torque(max_torque)
+    self.assertTrue(self._tx(self._torque_cmd_msg(max_torque)))
+    self._set_prev_torque(max_torque + 1)
+    self.assertFalse(self._tx(self._torque_cmd_msg(max_torque + 1)))
+
+  def test_only_the_measured_platform_moves(self):
+    # this raises a steering torque ceiling; it must not leak onto any other HKG platform
+    dynamic = sorted(c for c in CAR if c.config.flags & HyundaiFlags.DYNAMIC_LIMITS)
+    self.assertEqual(dynamic, [CAR.HYUNDAI_ELANTRA_2024])
+
+    # and above the top breakpoint the gain openpilot applies is bit-for-bit today's value
+    xs, ys = self.MAX_TORQUE_LOOKUP
+    for speed in (16.0, 20.0, 30.0, 40.0):
+      self.assertEqual(round(float(np.interp(speed, xs, ys))), 384)
 
 
 @parameterized_class(LDA_BUTTON)

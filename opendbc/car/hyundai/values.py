@@ -17,6 +17,15 @@ class CarControllerParams:
   ACCEL_MIN = -3.5 # m/s^2
   ACCEL_MAX = 2.0 # m/s^2
 
+  # Speed-scheduled steering torque for platforms that cannot reach the lateral acceleration the
+  # planner asks for at low speed. Measured on comma's fleet data for the CN7 Elantra (2.65M
+  # hands-off engaged samples): at 384 counts the car delivers a median 1.97 m/s^2 at full
+  # commanded torque below 7 m/s against a 2.34 demand, rising to 2.90 by 18 m/s. Response is
+  # monotonic all the way to the ceiling in every speed band, so the torque is not wasted.
+  # Above the top breakpoint this returns exactly STEER_MAX, so highway behavior is unchanged.
+  # panda holds the same numbers in HYUNDAI_LIMITS_DYNAMIC; the two must never diverge.
+  STEER_MAX_LOOKUP_DYNAMIC = [8., 16.], [409, 384]
+
   def __init__(self, CP):
     self.STEER_DELTA_UP = 3
     self.STEER_DELTA_DOWN = 7
@@ -56,6 +65,10 @@ class CarControllerParams:
     else:
       self.STEER_MAX = 384
 
+    # STEER_MAX stays the high-speed value; the lookup only adds authority below its top
+    # breakpoint. None on every platform that does not carry the flag.
+    self.STEER_MAX_LOOKUP = self.STEER_MAX_LOOKUP_DYNAMIC if CP.flags & HyundaiFlags.DYNAMIC_LIMITS else None
+
 
 class HyundaiSafetyFlags(IntFlag):
   EV_GAS = 1
@@ -68,6 +81,7 @@ class HyundaiSafetyFlags(IntFlag):
   CANFD_LKA_STEER_MSG_ALT = 128
   FCEV_GAS = 256
   ALT_LIMITS_2 = 512
+  DYNAMIC_LIMITS = 1024
 
 
 # Hyundai/Kia/Genesis SCC (Smart Cruise Control) and steering architecture:
@@ -148,6 +162,9 @@ class HyundaiFlags(IntFlag):
   FCEV = 2 ** 25
 
   ALT_LIMITS_2 = 2 ** 26
+
+  # this platform commands more steering torque at low speed, via STEER_MAX_LOOKUP_DYNAMIC
+  DYNAMIC_LIMITS = 2 ** 27
 
 
 @dataclass
@@ -233,7 +250,7 @@ class CAR(Platforms):
   HYUNDAI_ELANTRA_2024 = HyundaiPlatformConfig(
     [HyundaiCarDocs("Hyundai Elantra 2024-25", car_parts=CarParts.common([CarHarness.hyundai_k]))],
     CarSpecs(mass=2797 * CV.LB_TO_KG, wheelbase=2.72, steerRatio=12.9, tireStiffnessFactor=0.65),
-    flags=HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.CAMERA_SCC,
+    flags=HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.CAMERA_SCC | HyundaiFlags.DYNAMIC_LIMITS,
   )
   HYUNDAI_ELANTRA_HEV_2021 = HyundaiPlatformConfig(
     [HyundaiCarDocs("Hyundai Elantra Hybrid 2021-23", video="https://youtu.be/_EdYQtV52-c",

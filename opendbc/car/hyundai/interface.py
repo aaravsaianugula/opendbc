@@ -122,6 +122,9 @@ class CarInterface(CarInterfaceBase):
     if ret.flags & HyundaiFlags.ALT_LIMITS:
       ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.ALT_LIMITS.value
 
+    if ret.flags & HyundaiFlags.DYNAMIC_LIMITS:
+      ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.DYNAMIC_LIMITS.value
+
     if ret.flags & HyundaiFlags.ALT_LIMITS_2:
       ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.ALT_LIMITS_2.value
 

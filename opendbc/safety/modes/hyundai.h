@@ -3,10 +3,7 @@
 #include "opendbc/safety/declarations.h"
 #include "opendbc/safety/modes/hyundai_common.h"
 
-#define HYUNDAI_LIMITS(steer, rate_up, rate_down) { \
-  .max_torque = (steer), \
-  .max_rate_up = (rate_up), \
-  .max_rate_down = (rate_down), \
+#define HYUNDAI_LIMITS_COMMON \
   .max_rt_delta = 112, \
   .driver_torque_allowance = 50, \
   .driver_torque_multiplier = 2, \
@@ -17,6 +14,30 @@
   .max_invalid_request_frames = 2, \
   .min_valid_request_rt_interval = 810000,  /* 810ms; a ~10% buffer on cutting every 90 frames */ \
   .has_steer_req_tolerance = true, \
+
+#define HYUNDAI_LIMITS(steer, rate_up, rate_down) { \
+  .max_torque = (steer), \
+  .max_rate_up = (rate_up), \
+  .max_rate_down = (rate_down), \
+  HYUNDAI_LIMITS_COMMON \
+}
+
+// Some platforms cannot reach the lateral acceleration the planner asks for at low speed even at
+// full torque, so they get a speed-scheduled ceiling. steer_high is the unchanged highway value;
+// above the top breakpoint this is identical to HYUNDAI_LIMITS(steer_high, ...). max_torque must
+// be steer_low, since steer_torque_cmd_checks clamps the interpolated value to +/- max_torque.
+// This is the same schedule as CarControllerParams.STEER_MAX_LOOKUP_DYNAMIC in
+// opendbc/car/hyundai/values.py, and the two must never diverge.
+#define HYUNDAI_LIMITS_DYNAMIC(steer_low, steer_high, rate_up, rate_down) { \
+  .max_torque = (steer_low), \
+  .dynamic_max_torque = true, \
+  .max_torque_lookup = { \
+    {8., 16., 16.}, \
+    {(steer_low), (steer_high), (steer_high)}, \
+  }, \
+  .max_rate_up = (rate_up), \
+  .max_rate_down = (rate_down), \
+  HYUNDAI_LIMITS_COMMON \
 }
 
 extern const LongitudinalLimits HYUNDAI_LONG_LIMITS;
@@ -190,8 +211,14 @@ static void hyundai_rx_hook(const CANPacket_t *msg) {
     // sample wheel speed, averaging opposite corners
     if (msg->addr == 0x386U) {
       uint32_t front_left_speed = GET_BYTES(msg, 0, 2) & 0x3FFFU;
+      uint32_t front_right_speed = GET_BYTES(msg, 2, 2) & 0x3FFFU;
+      uint32_t rear_left_speed = GET_BYTES(msg, 4, 2) & 0x3FFFU;
       uint32_t rear_right_speed = GET_BYTES(msg, 6, 2) & 0x3FFFU;
       vehicle_moving = (front_left_speed > HYUNDAI_STANDSTILL_THRSLD) || (rear_right_speed > HYUNDAI_STANDSTILL_THRSLD);
+
+      // average of all 4 wheel speeds, for the speed-scheduled torque limit
+      // Conversion: raw * 0.03125 / 3.6 = m/s
+      UPDATE_VEHICLE_SPEED((front_left_speed + front_right_speed + rear_left_speed + rear_right_speed) / 4.0 * 0.03125 * KPH_TO_MS);
     }
 
     if (msg->addr == 0x394U) {
@@ -224,6 +251,7 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS = HYUNDAI_LIMITS(384, 3, 7);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT = HYUNDAI_LIMITS(270, 2, 3);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT_2 = HYUNDAI_LIMITS(170, 2, 3);
+  const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_DYNAMIC = HYUNDAI_LIMITS_DYNAMIC(409, 384, 3, 7);
 
   bool tx = true;
 
@@ -271,7 +299,8 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
     bool steer_req = GET_BIT(msg, 27U);
 
     const TorqueSteeringLimits limits = hyundai_alt_limits_2 ? HYUNDAI_STEERING_LIMITS_ALT_2 :
-                                        hyundai_alt_limits ? HYUNDAI_STEERING_LIMITS_ALT : HYUNDAI_STEERING_LIMITS;
+                                        hyundai_alt_limits ? HYUNDAI_STEERING_LIMITS_ALT :
+                                        hyundai_dynamic_limits ? HYUNDAI_STEERING_LIMITS_DYNAMIC : HYUNDAI_STEERING_LIMITS;
 
     if (steer_torque_cmd_checks(desired_torque, steer_req, limits)) {
       tx = false;
