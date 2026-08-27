@@ -348,10 +348,57 @@ class TestHyundaiSafetyDynamicLimits(TestHyundaiSafety):
     self._set_prev_torque(max_torque + 1)
     self.assertFalse(self._tx(self._torque_cmd_msg(max_torque + 1)))
 
+  def test_cold_start_cannot_transmit(self):
+    # test_no_speed_measured_yet bounds the ceiling at 409 with no speed measured. Bounding it
+    # is not the same as showing the window is unreachable, so attack that directly: with the
+    # speed still unknown, nothing may be transmitted at all -- not merely nothing above 409.
+    self.safety.init_tests()
+    self.assertEqual(self.safety.get_vehicle_speed_min(), 0)
+
+    # 0x386 is one of the mode's RX checks, so until it is arriving at frequency the safety
+    # tick invalidates the config, and that clears controls in both directions
+    self.safety.set_timer(int(2e6))
+    self.safety.set_controls_allowed(True)
+    self.safety.set_controls_allowed_lateral(True)
+    self.safety.safety_tick_current_safety_config()
+    self.assertFalse(self.safety.safety_config_valid())
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    for torque in (1, 384, 385, 409, 410):
+      self._set_prev_torque(torque)
+      self.assertFalse(self._tx(self._torque_cmd_msg(torque)),
+                       msg=f"{torque} was transmitted with no speed measured yet")
+
+  def test_stale_speed_cannot_hold_the_low_speed_ceiling(self):
+    # the other half of the same worry: measure a low speed, then stop reporting it. panda
+    # would keep the permissive 409 while the car accelerates away. The tick has to cut
+    # controls rather than let a stale sample hold the ceiling open.
+    self._reset_speed_measurement(0.0)
+    self.assertEqual(self._get_max_torque(0.0), max(self.MAX_TORQUE_LOOKUP[1]))
+
+    self.safety.set_timer(int(2e6))
+    self.safety.set_controls_allowed(True)
+    self.safety.set_controls_allowed_lateral(True)
+    self.safety.safety_tick_current_safety_config()
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self._set_prev_torque(max(self.MAX_TORQUE_LOOKUP[1]))
+    self.assertFalse(self._tx(self._torque_cmd_msg(max(self.MAX_TORQUE_LOOKUP[1]))),
+                     msg="a stale speed sample kept the raised ceiling open")
+
   def test_only_the_measured_platform_moves(self):
     # this raises a steering torque ceiling; it must not leak onto any other HKG platform
     dynamic = sorted(c for c in CAR if c.config.flags & HyundaiFlags.DYNAMIC_LIMITS)
     self.assertEqual(dynamic, [CAR.HYUNDAI_ELANTRA_2024])
+
+    # hyundaiLegacy shares hyundai_rx_hook and hyundai_tx_hook -- only .init differs -- so the
+    # ungated UPDATE_VEHICLE_SPEED added for this schedule runs on legacy platforms too. It is
+    # inert there only because none of them carries the flag. Assert that instead of trusting it.
+    legacy = [c for c in CAR if c.config.flags & HyundaiFlags.LEGACY]
+    self.assertTrue(legacy, "no legacy platforms found; this assertion has stopped testing anything")
+    for platform in legacy:
+      self.assertFalse(platform.config.flags & HyundaiFlags.DYNAMIC_LIMITS, platform)
 
     # and above the top breakpoint the gain openpilot applies is bit-for-bit today's value
     xs, ys = self.MAX_TORQUE_LOOKUP

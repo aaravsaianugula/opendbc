@@ -24,6 +24,15 @@ class CarControllerParams:
   # monotonic all the way to the ceiling in every speed band, so the torque is not wasted.
   # Above the top breakpoint this returns exactly STEER_MAX, so highway behavior is unchanged.
   # panda holds the same numbers in HYUNDAI_LIMITS_DYNAMIC; the two must never diverge.
+  #
+  # Raising the ceiling raises the driver-override envelope with it, on both sides:
+  # apply_driver_steer_torque_limits anchors driver_max_torque to steer_max, and panda hands
+  # driver_limit_check the interpolated value. Below the breakpoint the car therefore holds
+  # 25 counts (0.195 Nm) more against the driver before it starts winding down, and full
+  # release moves from -242 to -254.5 counts of driver torque, about 5% more effort. The
+  # shape of the wind-down is unchanged and it still reaches zero. That is inherent to
+  # raising a torque limit at all rather than a defect, but it is a real change in how the
+  # wheel feels to fight at low speed, and it should not be discovered from the driver's seat.
   STEER_MAX_LOOKUP_DYNAMIC = [8., 16.], [409, 384]
 
   def __init__(self, CP):
