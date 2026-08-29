@@ -1082,6 +1082,11 @@ class SafetyTest(SafetyTestBase):
 @add_regen_tests
 class CarSafetyTest(SafetyTest, MadsSafetyTestBase):
   STANDSTILL_THRESHOLD: float = 0.0
+  # How far past STANDSTILL_THRESHOLD the "past threshold" probes below step. The default of 1
+  # is one unit of whatever _speed_msg() takes. A mode whose _speed_msg takes m/s while the
+  # safety threshold is a raw CAN count must narrow this, or the probe lands hundreds of counts
+  # past the limit and stops testing the boundary at all.
+  STANDSTILL_STEP: float = 1
   GAS_PRESSED_THRESHOLD = 0
   RELAY_MALFUNCTION_ADDRS: dict[int, tuple[int, ...]] | None = None
 
@@ -1225,7 +1230,7 @@ class CarSafetyTest(SafetyTest, MadsSafetyTestBase):
     self._rx(_user_brake_msg(1))
     self.assertTrue(self.safety.get_controls_allowed())
     self.assertTrue(self.safety.get_longitudinal_allowed())
-    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + 1))
+    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + self.STANDSTILL_STEP))
     self._rx(_user_brake_msg(1))
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.get_longitudinal_allowed())
@@ -1243,7 +1248,7 @@ class CarSafetyTest(SafetyTest, MadsSafetyTestBase):
     self.assertFalse(self.safety.get_vehicle_moving())
 
     # past threshold
-    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + 1))
+    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + self.STANDSTILL_STEP))
     self.assertTrue(self.safety.get_vehicle_moving())
 
   def test_rx_hook_speed_mismatch(self):

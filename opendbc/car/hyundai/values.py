@@ -17,12 +17,24 @@ class CarControllerParams:
   ACCEL_MIN = -3.5 # m/s^2
   ACCEL_MAX = 2.0 # m/s^2
 
-  # The 2024-25 Elantra (CN7) runs out of steering torque in tight low-speed turns, and only
-  # there. Measured on one car running "CN7 MDPS C 1.00 1.02" firmware, over 40 one-minute
-  # segments sampled evenly across 498 recorded ones -- 157,917 frames with lateral control
-  # active. The transmitted command sits at the 384 ceiling for 9.7% of frames between 3 and
-  # 7 m/s, 1.3% between 7 and 10, 0.6% between 10 and 14, and never once above 14 m/s or
-  # below 3. Where it is pinned the planner asks for 2.35 m/s^2 and the car delivers 2.05.
+  # The 2024-25 Elantra (CN7) runs out of steering torque in tight low-speed turns. Measured on
+  # one car running "CN7 MDPS C 1.00 1.02" firmware. Re-derived 2026-08-29 over 62 one-minute
+  # segments sampled evenly across the 496 then on the device -- 225,275 frames with lateral
+  # control active, command read from carOutput.actuatorsOutput.torqueOutputCan:
+  #
+  #     0-3 m/s    2.21% of frames at the 384 ceiling
+  #     3-7 m/s    4.56%   <- the band that carries the deficit
+  #     7-10 m/s   0.64%
+  #     10-14 m/s  0.25%
+  #     14-18 m/s  0.09%
+  #     18+ m/s    0.02%
+  #
+  # An earlier 40-segment sample put the 3-7 band at 9.7% and reported exactly zero outside
+  # 3-14 m/s. Neither survived the full population: the rate is roughly half, and the tails are
+  # small but not zero. The ceiling does bind at low speed, and it binds less often than first
+  # claimed. Note 0-3 m/s is the second-most-pinned band while the schedule below is flat at its
+  # most permissive value from 0 to 8 m/s -- the extra authority is largest where the evidence
+  # for it is weakest. Whether to raise the lower breakpoint is the open question this leaves.
   #
   # STEER_MAX is a gain, not a ceiling -- new_torque = actuators.torque * STEER_MAX, and
   # actuators.torque is already clipped to +/-1 -- so raising it flat, which is what every
@@ -30,8 +42,11 @@ class CarControllerParams:
   # has never once asked for more than it got. This schedule leaves the freeway bit-for-bit
   # identical and spends the extra 25 counts only where the measurement says it is short.
   #
-  # 409 counts is 3.20 Nm on the OEM scale (0.0078125 Nm/count) against the stock 384 = 3.00
-  # Nm, and matches the value a large Korean CN7 fleet runs without EPS faults. It is NOT a
+  # 409 counts against the stock 384 is +6.5%. This platform's DBC carries CR_Lkas_StrToqReq as
+  # raw counts -- 16|11@1+ (1.0,-1024.0) -- so "3.20 Nm" is an inference from the Nm scaling in
+  # hyundai_2015_ccan.dbc (0.0078125 Nm/count), a file this car does not use. Treat the Nm
+  # figure as indicative, not measured. 409 matches the value a large Korean CN7 fleet runs
+  # without EPS faults. It is NOT a
   # measurement of this platform's factory envelope: across every LKAS11 frame the factory
   # camera sent in the segments screened for it, CR_Lkas_StrToqReq was zero, because the
   # camera never actuates while openpilot is engaged. The rule stated below -- "find the maximum value

@@ -73,6 +73,7 @@ def checksum(msg):
 class TestHyundaiSafety(HyundaiButtonBase, common.CarSafetyTest, common.DriverTorqueSteeringSafetyTest, common.SteerRequestCutSafetyTest):
   TX_MSGS = [[0x340, 0], [0x4F1, 0], [0x485, 0]]
   STANDSTILL_THRESHOLD = 0.375 / 3.6  # 0.375 kph, in m/s
+  STANDSTILL_STEP = 0.03125 / 3.6     # exactly one WHL_SPD count, so the probe stays a boundary
   RELAY_MALFUNCTION_ADDRS = {0: (0x340, 0x485)}  # LKAS11
   FWD_BLACKLISTED_ADDRS = {2: [0x340, 0x485]}
 
@@ -330,10 +331,13 @@ class TestHyundaiSafetyDynamicLimits(TestHyundaiSafety):
     self.assertFalse(self._tx(self._torque_cmd_msg(rejected)),
                      f"{rejected} should have been rejected")
 
-  def test_highway_ceiling_is_unchanged(self):
-    # Above the upper breakpoint this platform must behave exactly like every other HKG car.
-    # 385, not 384: steer_torque_cmd_checks adds one count and shifts the speed down by 1 m/s,
-    # and that slack is upstream's, present on the static limits too.
+  def test_highway_command_is_unchanged_panda_allows_one_more(self):
+    # The *command* above the upper breakpoint is bit-for-bit stock: openpilot interpolates to
+    # 384. Panda's acceptance threshold is 385, because steer_torque_cmd_checks adds one count
+    # and shifts the speed down by 1 m/s -- and both of those live INSIDE
+    # `if (limits.dynamic_max_torque)` (lateral.h), so they are NOT present on the static
+    # limits. See test_static_limits_have_no_slack. The name of this test used to claim the
+    # ceiling was unchanged; it is the command that is unchanged, not panda's threshold.
     for speed in (17., 25., 35.):
       self._reset_speed_measurement(speed)
       self.assertEqual(self._get_max_torque(speed), 385)
@@ -353,6 +357,21 @@ class TestHyundaiSafetyDynamicLimits(TestHyundaiSafety):
     # but the window must be bounded by 409 and not by anything above it.
     self.safety.init_tests()
     self._assert_ceiling(409, 410)
+
+  def test_ramp_top_is_not_385(self):
+    # At exactly the upper breakpoint the -1 m/s fudge puts panda one interpolation step below
+    # 384, so it accepts more than 385. Documented because the write-up rounded this off.
+    self._reset_speed_measurement(16.)
+    self.assertEqual(self._get_max_torque(16.), 388)
+    self._assert_ceiling(388, 389)
+
+  def test_static_limits_have_no_slack(self):
+    # The claim this test exists to keep honest: the +1 count is upstream's, but it is on the
+    # DYNAMIC path only. A stock Hyundai must accept exactly 384 and reject 385, at any speed.
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, 0)
+    self.safety.init_tests()
+    self._reset_speed_measurement(25.)
+    self._assert_ceiling(384, 385)
 
   def test_stale_speed_cannot_raise_the_ceiling(self):
     # Panda interpolates on vehicle_speed.min over the sample window, so a car at highway speed
