@@ -17,6 +17,28 @@ class CarControllerParams:
   ACCEL_MIN = -3.5 # m/s^2
   ACCEL_MAX = 2.0 # m/s^2
 
+  # The 2024-25 Elantra (CN7) runs out of steering torque in tight low-speed turns, and only
+  # there. Measured on one car running "CN7 MDPS C 1.00 1.02" firmware, over 40 one-minute
+  # segments sampled evenly across 498 recorded ones -- 157,917 frames with lateral control
+  # active. The transmitted command sits at the 384 ceiling for 9.7% of frames between 3 and
+  # 7 m/s, 1.3% between 7 and 10, 0.6% between 10 and 14, and never once above 14 m/s or
+  # below 3. Where it is pinned the planner asks for 2.35 m/s^2 and the car delivers 2.05.
+  #
+  # STEER_MAX is a gain, not a ceiling -- new_torque = actuators.torque * STEER_MAX, and
+  # actuators.torque is already clipped to +/-1 -- so raising it flat, which is what every
+  # fork shipping 409 does, multiplies every command on the freeway as well, where this car
+  # has never once asked for more than it got. This schedule leaves the freeway bit-for-bit
+  # identical and spends the extra 25 counts only where the measurement says it is short.
+  #
+  # 409 counts is 3.20 Nm on the OEM scale (0.0078125 Nm/count) against the stock 384 = 3.00
+  # Nm, and matches the value a large Korean CN7 fleet runs without EPS faults. It is NOT a
+  # measurement of this platform's factory envelope: across every LKAS11 frame the factory
+  # camera sent in the segments screened for it, CR_Lkas_StrToqReq was zero, because the
+  # camera never actuates while openpilot is engaged. The rule stated below -- "find the maximum value
+  # that the stock LKAS will request" -- has never been applied to the CN7 by anyone,
+  # including the forks that ship 409. Treat this as a bounded first step, not an answer.
+  STEER_MAX_LOOKUP_DYNAMIC = [[8., 16.], [409, 384]]
+
   def __init__(self, CP):
     self.STEER_DELTA_UP = 3
     self.STEER_DELTA_DOWN = 7
@@ -25,6 +47,7 @@ class CarControllerParams:
     self.STEER_DRIVER_FACTOR = 1
     self.STEER_THRESHOLD = 150
     self.STEER_STEP = 1  # 100 Hz
+    self.STEER_MAX_LOOKUP = None
 
     if CP.flags & HyundaiFlags.CANFD:
       self.STEER_MAX = 270
@@ -56,6 +79,11 @@ class CarControllerParams:
     else:
       self.STEER_MAX = 384
 
+      # Only the platforms whose ceiling is this 384 may schedule it. Living inside this
+      # branch is what guarantees that -- see STEER_MAX_LOOKUP_DYNAMIC above.
+      if CP.flags & HyundaiFlags.DYNAMIC_LIMITS:
+        self.STEER_MAX_LOOKUP = self.STEER_MAX_LOOKUP_DYNAMIC
+
 
 class HyundaiSafetyFlags(IntFlag):
   EV_GAS = 1
@@ -68,6 +96,7 @@ class HyundaiSafetyFlags(IntFlag):
   CANFD_LKA_STEER_MSG_ALT = 128
   FCEV_GAS = 256
   ALT_LIMITS_2 = 512
+  DYNAMIC_LIMITS = 1024
 
 
 # Hyundai/Kia/Genesis SCC (Smart Cruise Control) and steering architecture:
@@ -148,6 +177,9 @@ class HyundaiFlags(IntFlag):
   FCEV = 2 ** 25
 
   ALT_LIMITS_2 = 2 ** 26
+
+  # speed-scheduled steering torque ceiling; see CarControllerParams.STEER_MAX_LOOKUP_DYNAMIC
+  DYNAMIC_LIMITS = 2 ** 27
 
 
 @dataclass
@@ -233,7 +265,7 @@ class CAR(Platforms):
   HYUNDAI_ELANTRA_2024 = HyundaiPlatformConfig(
     [HyundaiCarDocs("Hyundai Elantra 2024-25", car_parts=CarParts.common([CarHarness.hyundai_k]))],
     CarSpecs(mass=2797 * CV.LB_TO_KG, wheelbase=2.72, steerRatio=12.9, tireStiffnessFactor=0.65),
-    flags=HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.CAMERA_SCC,
+    flags=HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.CAMERA_SCC | HyundaiFlags.DYNAMIC_LIMITS,
   )
   HYUNDAI_ELANTRA_HEV_2021 = HyundaiPlatformConfig(
     [HyundaiCarDocs("Hyundai Elantra Hybrid 2021-23", video="https://youtu.be/_EdYQtV52-c",

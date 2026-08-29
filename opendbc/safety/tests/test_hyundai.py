@@ -3,7 +3,7 @@ from opendbc.testing import parameterized_class
 import random
 import unittest
 
-from opendbc.car.hyundai.values import HyundaiSafetyFlags
+from opendbc.car.hyundai.values import CarControllerParams, HyundaiSafetyFlags
 from opendbc.car.structs import CarParams
 from opendbc.safety.tests.libsafety import libsafety_py
 import opendbc.safety.tests.common as common
@@ -72,7 +72,7 @@ def checksum(msg):
 @parameterized_class(LDA_BUTTON)
 class TestHyundaiSafety(HyundaiButtonBase, common.CarSafetyTest, common.DriverTorqueSteeringSafetyTest, common.SteerRequestCutSafetyTest):
   TX_MSGS = [[0x340, 0], [0x4F1, 0], [0x485, 0]]
-  STANDSTILL_THRESHOLD = 12  # 0.375 kph
+  STANDSTILL_THRESHOLD = 0.375 / 3.6  # 0.375 kph, in m/s
   RELAY_MALFUNCTION_ADDRS = {0: (0x340, 0x485)}  # LKAS11
   FWD_BLACKLISTED_ADDRS = {2: [0x340, 0x485]}
 
@@ -125,8 +125,9 @@ class TestHyundaiSafety(HyundaiButtonBase, common.CarSafetyTest, common.DriverTo
     return self.packer.make_can_msg_safety("TCS13", 0, values, fix_checksum=checksum)
 
   def _speed_msg(self, speed):
-    # safety doesn't scale, so undo the scaling
-    values = {"WHL_SPD_%s" % s: speed * 0.03125 for s in ["FL", "FR", "RL", "RR"]}
+    # speed is m/s; WHL_SPD11 carries km/h. panda interpolates the dynamic torque ceiling on
+    # this, so the conversion has to be real -- see TestHyundaiSafetyDynamicLimits.
+    values = {"WHL_SPD_%s" % s: speed * 3.6 for s in ["FL", "FR", "RL", "RR"]}
     values["WHL_SPD_AliveCounter_LSB"] = (self.cnt_speed % 16) & 0x3
     values["WHL_SPD_AliveCounter_MSB"] = (self.cnt_speed % 16) >> 2
     self.__class__.cnt_speed += 1
@@ -264,6 +265,102 @@ class TestHyundaiSafetyAltLimits2(TestHyundaiSafety):
     self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
     self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, HyundaiSafetyFlags.ALT_LIMITS_2)
     self.safety.init_tests()
+
+
+@parameterized_class(LDA_BUTTON)
+class TestHyundaiSafetyDynamicLimits(TestHyundaiSafety):
+  """The CN7 Elantra's speed-scheduled steering torque ceiling.
+
+  common.TorqueSteeringSafetyTestBase already sweeps the whole speed range and models both of
+  panda's fudges (it evaluates the lookup at speed - 1, then adds 1 count), so the generic
+  steer-safety tests do most of the work once DYNAMIC_MAX_TORQUE is set. What is added below
+  is only what those cannot see: that the two halves of the schedule still agree, that the
+  lookup runs in the right direction, and that the highway end did not move.
+  """
+
+  MAX_RATE_UP = 3
+  MAX_RATE_DOWN = 7
+  MAX_TORQUE_LOOKUP = [8, 16], [409, 384]
+  DYNAMIC_MAX_TORQUE = True
+
+  @classmethod
+  def setUpClass(cls):
+    if cls.__name__ == "TestHyundaiSafetyDynamicLimits":
+      cls.safety = None
+      raise unittest.SkipTest
+
+  def setUp(self):
+    self.packer = CANPackerSafety("hyundai_can_generated")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, HyundaiSafetyFlags.DYNAMIC_LIMITS)
+    self.safety.init_tests()
+
+  def test_schedule_halves_agree(self):
+    # The schedule exists twice: here, mirroring panda's HYUNDAI_LIMITS_DYNAMIC, and in
+    # CarControllerParams, which decides what openpilot commands. Asserting the literals as
+    # well as the equality is deliberate -- a test that only compared the two against each
+    # other would pass while both moved together, and a test that only read the car side
+    # could not see a panda-side edit at all.
+    self.assertEqual(self.MAX_TORQUE_LOOKUP, ([8, 16], [409, 384]))
+    bp, v = CarControllerParams.STEER_MAX_LOOKUP_DYNAMIC
+    self.assertEqual(list(bp), [float(x) for x in self.MAX_TORQUE_LOOKUP[0]])
+    self.assertEqual(list(v), list(self.MAX_TORQUE_LOOKUP[1]))
+
+  def test_lookup_runs_high_speed_low(self):
+    # Inverting the row is the failure mode that reads as a working change: panda would reject
+    # the raised torque at low speed, where the car actually commands it, and accept it on the
+    # highway, where the car never does.
+    self.assertGreater(self._get_max_torque(5.), self._get_max_torque(25.))
+    self.assertEqual(self._get_max_torque(5.), max(self.MAX_TORQUE_LOOKUP[1]))
+
+  def _assert_ceiling(self, allowed: int, rejected: int):
+    """The frame at `allowed` must go out and the one at `rejected` must not.
+
+    Both halves matter. controls_allowed is 0 after init_tests(), and with it clear panda
+    rejects everything -- which would make every "is rejected" assertion here pass regardless
+    of the ceiling. Setting the previous torque to the value under test zeroes the rate delta,
+    so max_rate_up cannot be what rejects the frame either; the only thing left is the limit.
+    """
+    self.safety.set_controls_allowed(1)
+    self._set_prev_torque(allowed)
+    self.assertTrue(self._tx(self._torque_cmd_msg(allowed)),
+                    f"{allowed} should have been accepted")
+    self._set_prev_torque(rejected)
+    self.assertFalse(self._tx(self._torque_cmd_msg(rejected)),
+                     f"{rejected} should have been rejected")
+
+  def test_highway_ceiling_is_unchanged(self):
+    # Above the upper breakpoint this platform must behave exactly like every other HKG car.
+    # 385, not 384: steer_torque_cmd_checks adds one count and shifts the speed down by 1 m/s,
+    # and that slack is upstream's, present on the static limits too.
+    for speed in (17., 25., 35.):
+      self._reset_speed_measurement(speed)
+      self.assertEqual(self._get_max_torque(speed), 385)
+      self._assert_ceiling(385, 386)
+
+  def test_low_speed_ceiling_is_the_max_torque(self):
+    # .max_torque in the C macro doubles as the SAFETY_CLAMP bound on the interpolated value.
+    # If it were set to the high-speed number the whole schedule would be capped at 384 and
+    # the change would be an expensive no-op that still passed every other test here.
+    self._reset_speed_measurement(5.)
+    self.assertEqual(self._get_max_torque(5.), 409)
+    self._assert_ceiling(409, 410)
+
+  def test_cold_start_cannot_exceed_the_low_speed_ceiling(self):
+    # vehicle_speed resets to 0 on init, which is the permissive end of a descending schedule.
+    # That is accepted -- panda is a backstop and the car still interpolates on its own vEgo --
+    # but the window must be bounded by 409 and not by anything above it.
+    self.safety.init_tests()
+    self._assert_ceiling(409, 410)
+
+  def test_stale_speed_cannot_raise_the_ceiling(self):
+    # Panda interpolates on vehicle_speed.min over the sample window, so a car at highway speed
+    # cannot buy low-speed authority by dropping a frame: every sample has to be slow. The
+    # accepted half of this is the control -- without it the assertion would pass on a panda
+    # that rejected everything.
+    self._reset_speed_measurement(25.)
+    self._assert_ceiling(385, 409)
 
 
 @parameterized_class(LDA_BUTTON)
