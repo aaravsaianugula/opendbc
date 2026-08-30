@@ -22,27 +22,6 @@
   HYUNDAI_LIMITS_COMMON(rate_up, rate_down) \
 }
 
-/* Speed-scheduled ceiling: more torque at low speed to reach the same lateral accel, the
-   same shape rivian.h already uses. Two things here are load-bearing and easy to invert:
-
-   .max_torque MUST be the LOW-speed value. lateral.h clamps the interpolated result to
-   +/- limits.max_torque, so putting the high-speed number here would cap the whole
-   schedule at it and silently turn the change into a no-op.
-
-   The lookup row MUST run high-then-low. Reversed, panda rejects the raised torque at low
-   speed -- where the car commands it -- and accepts it on the highway, where the car never
-   does. Both orderings satisfy a check that only compares the set of numbers, so the tests
-   assert the order itself. */
-#define HYUNDAI_LIMITS_DYNAMIC(steer_low, steer_high, rate_up, rate_down) { \
-  .max_torque = (steer_low), \
-  .dynamic_max_torque = true, \
-  .max_torque_lookup = { \
-    {8., 16., 16.}, \
-    {(steer_low), (steer_high), (steer_high)}, \
-  }, \
-  HYUNDAI_LIMITS_COMMON(rate_up, rate_down) \
-}
-
 extern const LongitudinalLimits HYUNDAI_LONG_LIMITS;
 const LongitudinalLimits HYUNDAI_LONG_LIMITS = {
   .max_accel = 200,   // 1/100 m/s2
@@ -253,7 +232,7 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS = HYUNDAI_LIMITS(384, 3, 7);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT = HYUNDAI_LIMITS(270, 2, 3);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT_2 = HYUNDAI_LIMITS(170, 2, 3);
-  const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_DYNAMIC = HYUNDAI_LIMITS_DYNAMIC(409, 384, 3, 7);
+  const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_RAISED = HYUNDAI_LIMITS(409, 3, 7);
 
   bool tx = true;
 
@@ -302,7 +281,7 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
 
     const TorqueSteeringLimits limits = hyundai_alt_limits_2 ? HYUNDAI_STEERING_LIMITS_ALT_2 :
                                         hyundai_alt_limits ? HYUNDAI_STEERING_LIMITS_ALT :
-                                        hyundai_dynamic_limits ? HYUNDAI_STEERING_LIMITS_DYNAMIC : HYUNDAI_STEERING_LIMITS;
+                                        hyundai_raised_limits ? HYUNDAI_STEERING_LIMITS_RAISED : HYUNDAI_STEERING_LIMITS;
 
     if (steer_torque_cmd_checks(desired_torque, steer_req, limits)) {
       tx = false;

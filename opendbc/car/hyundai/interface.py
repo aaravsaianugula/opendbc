@@ -108,12 +108,12 @@ class CarInterface(CarInterfaceBase):
       if ret.flags & HyundaiFlags.CAMERA_SCC:
         ret.safetyConfigs[0].safetyParam |= HyundaiSafetyFlags.CAMERA_SCC.value
 
-      # The schedule lives in two places that cannot see each other: CarControllerParams
-      # decides what openpilot commands, and panda decides what it will let out. This line is
-      # the only bridge between them. Without it the car quietly commands 409 at low speed and
-      # panda rejects every frame of it.
-      if ret.flags & HyundaiFlags.DYNAMIC_LIMITS:
-        ret.safetyConfigs[0].safetyParam |= HyundaiSafetyFlags.DYNAMIC_LIMITS.value
+      # The raised ceiling lives in two places that cannot see each other: CarControllerParams
+      # decides what openpilot commands, panda decides what it will let out, and panda cannot
+      # see carFingerprint -- only this param. This line is the only bridge between them.
+      # Without it the car commands 409 and panda rejects every frame above 384.
+      if ret.flags & HyundaiFlags.RAISED_LIMITS:
+        ret.safetyConfigs[0].safetyParam |= HyundaiSafetyFlags.RAISED_LIMITS.value
 
       # These cars have the LFA button on the steering wheel
       if 0x391 in fingerprint[0]:

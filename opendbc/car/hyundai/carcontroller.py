@@ -85,16 +85,8 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     hud_control = CC.hudControl
 
     # steering torque
-    # STEER_MAX is a gain here, not a ceiling: actuators.torque is already clipped to +/-1.
-    # steer_max must therefore be used in all three places below -- as the multiplier, as the
-    # bound handed to the rate limiter, and as the divisor for the feedback -- or the value
-    # reported back to the lateral controller stops being the fraction it asked for.
-    steer_max = self.params.STEER_MAX
-    if self.params.STEER_MAX_LOOKUP is not None:
-      steer_max = int(round(float(np.interp(CS.out.vEgoRaw, *self.params.STEER_MAX_LOOKUP))))
-    new_torque = int(round(actuators.torque * steer_max))
-    apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque,
-                                                    self.params, steer_max)
+    new_torque = int(round(actuators.torque * self.params.STEER_MAX))
+    apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, self.params)
 
     # >90 degree steering fault prevention
     self.angle_limit_counter, apply_steer_req = common_fault_avoidance(abs(CS.out.steeringAngleDeg) >= MAX_ANGLE, CC.latActive,
@@ -148,7 +140,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     can_sends.extend(IntelligentCruiseButtonManagementInterface.update(self, CS, CC_SP, self.packer, self.frame, self.last_button_frame, self.CAN))
 
     new_actuators = actuators.as_builder()
-    new_actuators.torque = apply_torque / steer_max
+    new_actuators.torque = apply_torque / self.params.STEER_MAX
     new_actuators.torqueOutputCan = apply_torque
     new_actuators.accel = self.tuning.actual_accel
 

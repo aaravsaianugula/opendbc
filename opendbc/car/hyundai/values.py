@@ -18,9 +18,9 @@ class CarControllerParams:
   ACCEL_MAX = 2.0 # m/s^2
 
   # The 2024-25 Elantra (CN7) runs out of steering torque in tight low-speed turns. Measured on
-  # one car running "CN7 MDPS C 1.00 1.02" firmware. Re-derived 2026-08-29 over 62 one-minute
-  # segments sampled evenly across the 496 then on the device -- 225,275 frames with lateral
-  # control active, command read from carOutput.actuatorsOutput.torqueOutputCan:
+  # one car running "CN7 MDPS C 1.00 1.02" firmware, over 62 one-minute segments sampled evenly
+  # across the 496 then on the device -- 225,275 frames with lateral control active, command
+  # read from carOutput.actuatorsOutput.torqueOutputCan:
   #
   #     0-3 m/s    2.21% of frames at the 384 ceiling
   #     3-7 m/s    4.56%   <- the band that carries the deficit
@@ -29,30 +29,27 @@ class CarControllerParams:
   #     14-18 m/s  0.09%
   #     18+ m/s    0.02%
   #
-  # An earlier 40-segment sample put the 3-7 band at 9.7% and reported exactly zero outside
-  # 3-14 m/s. Neither survived the full population: the rate is roughly half, and the tails are
-  # small but not zero. The ceiling does bind at low speed, and it binds less often than first
-  # claimed. Note 0-3 m/s is the second-most-pinned band while the schedule below is flat at its
-  # most permissive value from 0 to 8 m/s -- the extra authority is largest where the evidence
-  # for it is weakest. Whether to raise the lower breakpoint is the open question this leaves.
+  # RAISED_LIMITS lifts the ceiling to a flat 409 counts at every speed. That is what carrotpilot
+  # ships as its default for every HKG car, with STEER_DELTA_UP/DOWN, STEER_DRIVER_ALLOWANCE,
+  # STEER_DRIVER_MULTIPLIER and STEER_THRESHOLD all left at upstream's values -- checked against
+  # ajouatom/openpilot@carrot-wip rather than assumed.
   #
-  # STEER_MAX is a gain, not a ceiling -- new_torque = actuators.torque * STEER_MAX, and
-  # actuators.torque is already clipped to +/-1 -- so raising it flat, which is what every
-  # fork shipping 409 does, multiplies every command on the freeway as well, where this car
-  # has never once asked for more than it got. This schedule leaves the freeway bit-for-bit
-  # identical and spends the extra 25 counts only where the measurement says it is short.
+  # Flat is a deliberate choice over a speed schedule, and it costs something. STEER_MAX is a
+  # GAIN, not a ceiling -- new_torque = actuators.torque * STEER_MAX, and actuators.torque is
+  # already clipped to +/-1 -- so 409 multiplies every command by 409/384 = +6.5%, on the
+  # freeway as much as in a turn, where the table above says this car has never once asked for
+  # more than it got. What it buys is that panda's limit stops depending on vehicle speed at
+  # all: no interpolation, no speed fudge, no +1 count of slack, and nothing that a noisy,
+  # stale, dropped or spoofed speed reading can move. A schedule has to be right about the
+  # speed to be safe. This only has to be right about one number.
   #
-  # 409 counts against the stock 384 is +6.5%. This platform's DBC carries CR_Lkas_StrToqReq as
-  # raw counts -- 16|11@1+ (1.0,-1024.0) -- so "3.20 Nm" is an inference from the Nm scaling in
-  # hyundai_2015_ccan.dbc (0.0078125 Nm/count), a file this car does not use. Treat the Nm
-  # figure as indicative, not measured. 409 matches the value a large Korean CN7 fleet runs
-  # without EPS faults. It is NOT a
-  # measurement of this platform's factory envelope: across every LKAS11 frame the factory
-  # camera sent in the segments screened for it, CR_Lkas_StrToqReq was zero, because the
-  # camera never actuates while openpilot is engaged. The rule stated below -- "find the maximum value
-  # that the stock LKAS will request" -- has never been applied to the CN7 by anyone,
-  # including the forks that ship 409. Treat this as a bounded first step, not an answer.
-  STEER_MAX_LOOKUP_DYNAMIC = [[8., 16.], [409, 384]]
+  # That number is NOT a measurement of this platform's factory envelope. Across every LKAS11
+  # frame the factory camera sent in the recorded segments, CR_Lkas_StrToqReq was zero -- the
+  # camera does not actuate while openpilot is engaged -- so the rule stated below, "find the
+  # maximum value that the stock LKAS will request", has never been applied to the CN7 by
+  # anyone. It has not been applied to the 384 default either. 409 rests on the fact that a
+  # large Korean CN7 fleet runs it without EPS faults: fleet evidence, not a measurement of
+  # this car.
 
   def __init__(self, CP):
     self.STEER_DELTA_UP = 3
@@ -62,7 +59,6 @@ class CarControllerParams:
     self.STEER_DRIVER_FACTOR = 1
     self.STEER_THRESHOLD = 150
     self.STEER_STEP = 1  # 100 Hz
-    self.STEER_MAX_LOOKUP = None
 
     if CP.flags & HyundaiFlags.CANFD:
       self.STEER_MAX = 270
@@ -94,10 +90,12 @@ class CarControllerParams:
     else:
       self.STEER_MAX = 384
 
-      # Only the platforms whose ceiling is this 384 may schedule it. Living inside this
-      # branch is what guarantees that -- see STEER_MAX_LOOKUP_DYNAMIC above.
-      if CP.flags & HyundaiFlags.DYNAMIC_LIMITS:
-        self.STEER_MAX_LOOKUP = self.STEER_MAX_LOOKUP_DYNAMIC
+      # Only platforms whose stock ceiling is this 384 may raise it, and living inside this
+      # branch is what guarantees that. Assigned after the chain instead, RAISED_LIMITS would
+      # silently outrank CANFD, the 255 list, ALT_LIMITS and ALT_LIMITS_2 -- a car carrying
+      # both flags would command 409 while panda enforced 170.
+      if CP.flags & HyundaiFlags.RAISED_LIMITS:
+        self.STEER_MAX = 409
 
 
 class HyundaiSafetyFlags(IntFlag):
@@ -111,7 +109,7 @@ class HyundaiSafetyFlags(IntFlag):
   CANFD_LKA_STEER_MSG_ALT = 128
   FCEV_GAS = 256
   ALT_LIMITS_2 = 512
-  DYNAMIC_LIMITS = 1024
+  RAISED_LIMITS = 1024
 
 
 # Hyundai/Kia/Genesis SCC (Smart Cruise Control) and steering architecture:
@@ -193,8 +191,8 @@ class HyundaiFlags(IntFlag):
 
   ALT_LIMITS_2 = 2 ** 26
 
-  # speed-scheduled steering torque ceiling; see CarControllerParams.STEER_MAX_LOOKUP_DYNAMIC
-  DYNAMIC_LIMITS = 2 ** 27
+  # flat raised steering torque ceiling; see CarControllerParams at the top of this file
+  RAISED_LIMITS = 2 ** 27
 
 
 @dataclass
@@ -280,7 +278,7 @@ class CAR(Platforms):
   HYUNDAI_ELANTRA_2024 = HyundaiPlatformConfig(
     [HyundaiCarDocs("Hyundai Elantra 2024-25", car_parts=CarParts.common([CarHarness.hyundai_k]))],
     CarSpecs(mass=2797 * CV.LB_TO_KG, wheelbase=2.72, steerRatio=12.9, tireStiffnessFactor=0.65),
-    flags=HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.CAMERA_SCC | HyundaiFlags.DYNAMIC_LIMITS,
+    flags=HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.CAMERA_SCC | HyundaiFlags.RAISED_LIMITS,
   )
   HYUNDAI_ELANTRA_HEV_2021 = HyundaiPlatformConfig(
     [HyundaiCarDocs("Hyundai Elantra Hybrid 2021-23", video="https://youtu.be/_EdYQtV52-c",
