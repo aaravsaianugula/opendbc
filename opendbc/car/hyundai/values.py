@@ -43,13 +43,22 @@ class CarControllerParams:
   # stale, dropped or spoofed speed reading can move. A schedule has to be right about the
   # speed to be safe. This only has to be right about one number.
   #
-  # That number is NOT a measurement of this platform's factory envelope. Across every LKAS11
-  # frame the factory camera sent in the recorded segments, CR_Lkas_StrToqReq was zero -- the
-  # camera does not actuate while openpilot is engaged -- so the rule stated below, "find the
-  # maximum value that the stock LKAS will request", has never been applied to the CN7 by
-  # anyone. It has not been applied to the 384 default either. 409 rests on the fact that a
-  # large Korean CN7 fleet runs it without EPS faults: fleet evidence, not a measurement of
-  # this car.
+  # THE FACTORY ENVELOPE IS 157 COUNTS, and an earlier version of this comment was wrong to
+  # say it could not be measured. Across 509 recorded segments the camera requests zero in
+  # 98.6% of its LKAS11 frames, because it does not actuate while openpilot is engaged -- which
+  # is what that claim was generalised from. But one route, 000000b9--0c339ed202, has openpilot
+  # transmitting zero LKAS11 frames across all 18 of its segments: stock LKAS was driving. In
+  # those 40,144 frames CR_Lkas_StrToqReq reaches 157 with CF_Lkas_ActToi set. It is one drive,
+  # so 157 is a floor on Hyundai's envelope rather than a proof of its maximum.
+  #
+  # Read against the rule stated below -- "find the maximum value that the stock LKAS will
+  # request, and if it is <384 add your car to this list" -- 157 does not justify 384, let
+  # alone 409. Applied literally it would put the CN7 in the 255 list or lower. NEITHER ceiling
+  # on this platform is derived from that rule: 384 is comma's HKG default (2.4x factory) and
+  # 409 is what a large Korean CN7 fleet runs without EPS faults (2.6x factory). The evidence
+  # for 409 is fleet evidence, not stock-limit evidence, and the same is true of the 384 it
+  # replaces. Recorded here so nobody has to rediscover it, and so the claim being made stays
+  # the honest one.
 
   def __init__(self, CP):
     self.STEER_DELTA_UP = 3
