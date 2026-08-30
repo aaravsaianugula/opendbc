@@ -51,14 +51,22 @@ class CarControllerParams:
   # those 40,144 frames CR_Lkas_StrToqReq reaches 157 with CF_Lkas_ActToi set. It is one drive,
   # so 157 is a floor on Hyundai's envelope rather than a proof of its maximum.
   #
-  # Read against the rule stated below -- "find the maximum value that the stock LKAS will
-  # request, and if it is <384 add your car to this list" -- 157 does not justify 384, let
-  # alone 409. Applied literally it would put the CN7 in the 255 list or lower. NEITHER ceiling
-  # on this platform is derived from that rule: 384 is comma's HKG default (2.4x factory) and
-  # 409 is what a large Korean CN7 fleet runs without EPS faults (2.6x factory). The evidence
-  # for 409 is fleet evidence, not stock-limit evidence, and the same is true of the 384 it
-  # replaces. Recorded here so nobody has to rediscover it, and so the claim being made stays
-  # the honest one.
+  # 157 does NOT mean the ceiling belongs at 157, and reading it that way is a category error.
+  # Hyundai's LKAS is a lane-centring feature: it nudges toward a lane line and, past that,
+  # hands back rather than pulling harder. Every peak request in that drive lands at 1.1-2.0
+  # degrees of wheel angle. openpilot is doing a different job -- it steers through turns and
+  # intersections at up to ~146 degrees -- so the factory number bounds what Hyundai's FEATURE
+  # asks for, not what the MDPS can deliver and not a safety limit. It is a useful reference
+  # point, not a ceiling to copy.
+  #
+  # So the rule quoted below is the wrong instrument for this platform, and that is worth
+  # saying plainly rather than quietly ignoring it: it was written for cars whose stock LKAS
+  # attempts the same manoeuvres openpilot does. The CN7's does not. 384 (comma's HKG default)
+  # and 409 (carrotpilot's, run by a large Korean CN7 fleet without EPS faults) both rest on
+  # fleet evidence instead, which is the honest basis to cite.
+  #
+  # The MDPS remains the arbiter in every case. It has its own boost curve, fault logic and
+  # driver-override arbitration, and it is free to refuse any of this.
 
   def __init__(self, CP):
     self.STEER_DELTA_UP = 3
