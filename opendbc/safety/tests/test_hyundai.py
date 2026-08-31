@@ -369,6 +369,11 @@ class TestHyundaiSafetyRaisedLimits(TestHyundaiSafety):
     params = CarControllerParams(self._car_params(True))
     for speed in (0., 3., 5., 8.93, 8.94, 8.95, 11.175, 13.40, 13.41, 16., 25., 40.):
       with self.subTest(speed=speed):
+        # controls_allowed is 0 after init_tests() and panda then rejects EVERYTHING, so
+        # without this the test fails at every speed for a reason that has nothing to do
+        # with the ceiling. _assert_ceiling's docstring warns about the same trap from the
+        # other side, where it would make a rejection assertion pass vacuously.
+        self.safety.set_controls_allowed(1)
         self._reset_speed_measurement(speed)
         commanded = params.steer_max_at(speed)
         self._set_prev_torque(commanded)
