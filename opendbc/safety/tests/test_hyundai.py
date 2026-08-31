@@ -270,19 +270,35 @@ class TestHyundaiSafetyAltLimits2(TestHyundaiSafety):
 
 @parameterized_class(LDA_BUTTON)
 class TestHyundaiSafetyRaisedLimits(TestHyundaiSafety):
-  """The CN7 Elantra's flat raised steering torque ceiling.
+  """The CN7 Elantra's raised steering torque ceiling: FLAT here, SCHEDULED in opendbc.
 
-  Three lines of class attributes is the entire configuration, and that is the argument for the
-  flat shape: common.DriverTorqueSteeringSafetyTest then sweeps the ceiling, both rate limits
-  and the driver-override envelope exactly as it already does for ALT_LIMITS and ALT_LIMITS_2.
-  What is added below is only what those generic tests cannot see -- that the two halves of the
-  change agree on 409, that the ceiling does not move with speed no matter what speed panda is
-  told, and that this path carries none of the slack the dynamic path has.
+  Panda enforces one number at every speed. opendbc commands a speed schedule underneath it --
+  500 counts below 20 mph ramping to 409 by 30 mph -- and panda cannot see that schedule at
+  all. The asymmetry is the design: the schedule has to be right about the speed to steer
+  well, but panda does not have to be right about the speed to be safe, so no speed reading
+  enters this path and none of the dynamic path's -1 m/s fudge or +1 count of slack applies.
+
+  What it costs is unenforced headroom, and the amount is asserted rather than waved at:
+  12 counts below 20 mph and 103 above. That is carrotpilot's shape, and this file previously
+  argued against it. The argument was fair; the trade was made deliberately.
+
+  Three lines of class attributes is still the entire configuration, so
+  common.DriverTorqueSteeringSafetyTest sweeps the ceiling, both rate limits and the
+  driver-override envelope exactly as it does for ALT_LIMITS and ALT_LIMITS_2. What is added
+  below is only what those generic tests cannot see: that panda sits above every point of
+  opendbc's schedule, that every value opendbc will actually command is accepted, and that no
+  speed reading can move what panda accepts.
   """
 
   MAX_RATE_UP = 3
   MAX_RATE_DOWN = 7
-  MAX_TORQUE_LOOKUP = [0], [409]
+  MAX_TORQUE_LOOKUP = [0], [512]
+
+  # opendbc's schedule, restated. Read from CarControllerParams in the tests below as well --
+  # the literals are here so a test that only compared the two sides against each other cannot
+  # stay green while both move together.
+  SCHEDULE_PEAK = 500
+  SCHEDULE_FLOOR = 409
 
   @classmethod
   def setUpClass(cls):
@@ -323,36 +339,68 @@ class TestHyundaiSafetyRaisedLimits(TestHyundaiSafety):
     self.assertFalse(self._tx(self._torque_cmd_msg(rejected)),
                      f"{rejected} should have been rejected {note}")
 
-  def test_command_and_panda_agree(self):
-    # The ceiling exists twice: here, mirroring panda's HYUNDAI_STEERING_LIMITS_RAISED, and in
-    # CarControllerParams, which decides what openpilot commands. Asserting the literal as well
-    # as the equality is deliberate -- a test that only compared the two against each other
-    # would stay green while both moved together, and one that only read the car side could not
-    # see a panda-side edit at all.
-    self.assertEqual(self.MAX_TORQUE, 409)
-    self.assertEqual(CarControllerParams(self._car_params(True)).STEER_MAX, 409)
-    self._assert_ceiling(409, 410)
+  def test_panda_sits_above_every_point_of_the_schedule(self):
+    # THE check for this design. opendbc schedules underneath a flat panda, so the single way
+    # it fails is a schedule point above what panda will pass: the car would build a frame,
+    # panda would drop it, and steering would simply stop working at that speed with nothing
+    # in any log saying why. Asserting the literals as well as the relationship is deliberate
+    # -- a test that only compared the two sides would stay green while both moved together.
+    self.assertEqual(self.MAX_TORQUE, 512)
+    params = CarControllerParams(self._car_params(True))
+
+    self.assertEqual(params.STEER_MAX, self.SCHEDULE_FLOOR)
+    commanded = [params.steer_max_at(v / 10.0) for v in range(1000)]
+    self.assertEqual(max(commanded), self.SCHEDULE_PEAK)
+    self.assertEqual(min(commanded), self.SCHEDULE_FLOOR)
+    self.assertLessEqual(max(commanded), self.MAX_TORQUE,
+                         "opendbc commands more than panda will accept")
+
+    # And state the unenforced headroom rather than leaving it implicit. If either number
+    # moves, someone has changed how much of the envelope is unpoliced and should say so.
+    self.assertEqual(self.MAX_TORQUE - self.SCHEDULE_PEAK, 12)
+    self.assertEqual(self.MAX_TORQUE - self.SCHEDULE_FLOOR, 103)
+
+    self._assert_ceiling(512, 513)
+
+  def test_panda_accepts_everything_opendbc_will_command(self):
+    # The relationship above, executed frame by frame instead of compared as numbers: at each
+    # speed, take the exact ceiling opendbc would use there and put that value on the wire.
+    # An off-by-one in either rounding rule shows up here and nowhere else.
+    params = CarControllerParams(self._car_params(True))
+    for speed in (0., 3., 5., 8.93, 8.94, 8.95, 11.175, 13.40, 13.41, 16., 25., 40.):
+      with self.subTest(speed=speed):
+        self._reset_speed_measurement(speed)
+        commanded = params.steer_max_at(speed)
+        self._set_prev_torque(commanded)
+        self.assertTrue(self._tx(self._torque_cmd_msg(commanded)),
+                        f"panda rejected {commanded}, which opendbc commands at {speed} m/s")
 
   def test_the_flag_is_what_raises_it(self):
-    # Without RAISED_LIMITS the same platform must fall back to the stock 384. If the raise
-    # leaked out of the flag check, every other Hyundai on this branch would be commanding 409.
-    self.assertEqual(CarControllerParams(self._car_params(False)).STEER_MAX, 384)
+    # Without RAISED_LIMITS the same platform must fall back to the stock 384 AND carry no
+    # schedule at all. If either leaked out of the flag check, every other Hyundai on this
+    # branch would be commanding above what panda enforces for it.
+    unraised = CarControllerParams(self._car_params(False))
+    self.assertEqual(unraised.STEER_MAX, 384)
+    self.assertIsNone(unraised.STEER_MAX_LOOKUP)
+    for speed in (0., 5., 8.94, 25.):
+      self.assertEqual(unraised.steer_max_at(speed), 384)
 
   def test_speed_does_not_change_the_ceiling(self):
-    # The whole point of the flat shape. A schedule has to be right about the speed to be safe;
-    # this only has to be right about one number, and this is the test that says so. 410 must be
-    # rejected at every speed too: the +1 count of slack and the -1 m/s fudge in lateral.h both
-    # live inside `if (limits.dynamic_max_torque)`, which this path does not take.
-    for speed in (0., 5., 7.9, 8., 12., 16., 16.1, 25., 40.):
+    # opendbc's ceiling moves with speed; PANDA'S DOES NOT, and that is the property being
+    # asserted. 513 must be rejected at every speed too: the +1 count of slack and the -1 m/s
+    # fudge in lateral.h both live inside `if (limits.dynamic_max_torque)`, which this path
+    # does not take. The speeds include both schedule breakpoints and the values either side
+    # of them, where a leaked speed dependence would show up first.
+    for speed in (0., 5., 7.9, 8.94, 12., 13.41, 16., 16.1, 25., 40.):
       self._reset_speed_measurement(speed)
-      self._assert_ceiling(409, 410, f"at {speed} m/s")
+      self._assert_ceiling(512, 513, f"at {speed} m/s")
 
   def test_cold_start_ceiling(self):
     # No speed frame has ever been received. Under the old schedule this was the permissive
     # end of a descending lookup and needed its own argument; here there is nothing for it to
     # be the end of, and the mode no longer samples vehicle_speed at all.
     self.safety.init_tests()
-    self._assert_ceiling(409, 410, "before any speed frame")
+    self._assert_ceiling(512, 513, "before any speed frame")
 
   def test_bad_speed_cannot_move_the_ceiling(self):
     # Stale, absurd and reversed-looking speed readings. None of them can move a limit that
@@ -361,10 +409,10 @@ class TestHyundaiSafetyRaisedLimits(TestHyundaiSafety):
     # this exercises the real RX path. It is the test that would have to grow a case per
     # failure mode if the ceiling were scheduled.
     self._reset_speed_measurement(30.)
-    self._assert_ceiling(409, 410, "after highway speed, then no further frames (stale)")
+    self._assert_ceiling(512, 513, "after highway speed, then no further frames (stale)")
     for speed in (0., 200., 1000.):
       self._reset_speed_measurement(speed)
-      self._assert_ceiling(409, 410, f"at an implausible {speed} m/s")
+      self._assert_ceiling(512, 513, f"at an implausible {speed} m/s")
 
   def test_lfahda_mfc_length_is_gated(self):
     """0x485 is 8 bytes on the CN7 bus and 4 everywhere else, and only the flag may widen it.
@@ -391,8 +439,8 @@ class TestHyundaiSafetyRaisedLimits(TestHyundaiSafety):
 
   def test_static_limits_have_no_slack(self):
     # Keeps the neighbors honest: upstream's +1 count is on the DYNAMIC path only, and nothing
-    # on this branch takes that path any more. A stock Hyundai must accept exactly 384 and
-    # reject 385, at any speed.
+    # on this branch takes that path -- the CN7's schedule lives in opendbc, not in panda. A
+    # stock Hyundai must accept exactly 384 and reject 385, at any speed.
     try:
       self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, 0)
       self.safety.init_tests()

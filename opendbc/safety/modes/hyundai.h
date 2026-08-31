@@ -224,7 +224,11 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS = HYUNDAI_LIMITS(384, 3, 7);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT = HYUNDAI_LIMITS(270, 2, 3);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT_2 = HYUNDAI_LIMITS(170, 2, 3);
-  const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_RAISED = HYUNDAI_LIMITS(409, 3, 7);
+  // Flat and permissive: opendbc schedules 500 below 20 mph down to 409 by 30 mph, and this
+  // sits above every point of it. Panda reads no speed on this path by design -- see the
+  // CarControllerParams comment in values.py. opendbc/car/hyundai/tests/test_hyundai.py
+  // reads this number out of this line and fails if any schedule point rises above it.
+  const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_RAISED = HYUNDAI_LIMITS(512, 3, 7);
 
   bool tx = true;
 

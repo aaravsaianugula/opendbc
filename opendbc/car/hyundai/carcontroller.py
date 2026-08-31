@@ -84,9 +84,14 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     actuators = CC.actuators
     hud_control = CC.hudControl
 
-    # steering torque
-    new_torque = int(round(actuators.torque * self.params.STEER_MAX))
-    apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, self.params)
+    # steering torque. steer_max is the ceiling in force at this speed; on platforms without a
+    # schedule it is just self.params.STEER_MAX, so this is a no-op for them. It has to reach
+    # BOTH the multiplier and the rate limiter -- passing it to only one of them would command
+    # a torque the limiter then clips, or clip to a ceiling the command never reaches.
+    steer_max = self.params.steer_max_at(CS.out.vEgoRaw)
+    new_torque = int(round(actuators.torque * steer_max))
+    apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque,
+                                                    self.params, steer_max)
 
     # >90 degree steering fault prevention
     self.angle_limit_counter, apply_steer_req = common_fault_avoidance(abs(CS.out.steeringAngleDeg) >= MAX_ANGLE, CC.latActive,
@@ -140,7 +145,9 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     can_sends.extend(IntelligentCruiseButtonManagementInterface.update(self, CS, CC_SP, self.packer, self.frame, self.last_button_frame, self.CAN))
 
     new_actuators = actuators.as_builder()
-    new_actuators.torque = apply_torque / self.params.STEER_MAX
+    # the SAME steer_max the command was built from. Normalising the feedback by a different
+    # ceiling than the multiplier used silently corrupts the torque learner's input.
+    new_actuators.torque = apply_torque / steer_max
     new_actuators.torqueOutputCan = apply_torque
     new_actuators.accel = self.tuning.actual_accel
 

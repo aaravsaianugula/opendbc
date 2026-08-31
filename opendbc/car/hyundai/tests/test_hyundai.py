@@ -1,7 +1,10 @@
+import re
 import unittest
+from collections import defaultdict
+from pathlib import Path
 
 from opendbc.can import CANPacker
-from opendbc.car import gen_empty_fingerprint, Bus
+from opendbc.car import gen_empty_fingerprint, Bus, structs
 from opendbc.car.structs import CarParams
 from opendbc.car.fw_versions import build_fw_dict
 from opendbc.car.hyundai.interface import CarInterface
@@ -52,7 +55,25 @@ CAN_FEATURE_FLAGS = (HyundaiFlags.CLUSTER_GEARS | HyundaiFlags.TCU_GEARS | Hyund
 # explicit set so that widening the raised ceiling to another car is a deliberate, reviewed
 # edit to this line rather than a side effect of adding a flag somewhere else.
 RAISED_LIMITS_PLATFORMS = {CAR.HYUNDAI_ELANTRA_2024}
+
+# STEER_MAX is the HIGH-SPEED end of the schedule, not its maximum. That is deliberate and it
+# is also what Rivian does (STEER_MAX = 250 under STEER_MAX_LOOKUP = [9,17],[350,250]): if the
+# schedule is ever bypassed -- a regression that stops carcontroller passing steer_max, or any
+# consumer reading the attribute directly -- the car falls back to exactly the flat 409 it has
+# been driving, not to the raised low-speed value at every speed.
 RAISED_STEER_MAX = 409
+RAISED_STEER_MAX_LOW_SPEED = 500
+RAISED_SCHEDULE_BP = (8.94, 13.41)   # 20 mph and 30 mph
+
+
+def panda_raised_ceiling():
+  # Read panda's flat ceiling out of the C source rather than copying the number. The one way
+  # "opendbc schedules, panda is flat" fails is a schedule point above what panda will pass,
+  # and a hand-copied constant here would agree with itself while the two drifted apart.
+  src = Path(__file__).parents[3] / "safety" / "modes" / "hyundai.h"
+  m = re.search(r"HYUNDAI_STEERING_LIMITS_RAISED\s*=\s*HYUNDAI_LIMITS\(\s*(\d+)", src.read_text())
+  assert m, f"could not find HYUNDAI_STEERING_LIMITS_RAISED in {src}"
+  return int(m.group(1))
 
 
 def cars_with(flags):
@@ -100,7 +121,8 @@ class TestHyundaiFingerprint(unittest.TestCase):
 
       # without this openpilot commands 409 and panda rejects every frame above 384
       assert car_flag == safety_bit, f"{car_model}: flag/safetyParam disagree ({car_flag} vs {safety_bit})"
-      # and the flag has to be what actually moves the number
+      # and the flag has to be what actually moves the number. STEER_MAX is the high-speed
+      # end of the schedule; test_raised_limits_schedule covers the speed-dependent part.
       assert (steer_max == RAISED_STEER_MAX) == car_flag, f"{car_model}: STEER_MAX {steer_max} with flag {car_flag}"
       if car_flag:
         carrying.add(car_model)
@@ -110,6 +132,107 @@ class TestHyundaiFingerprint(unittest.TestCase):
         assert not (CP.flags & lower), f"{car_model}: raised ceiling on a car panda limits lower"
 
     assert carrying == RAISED_LIMITS_PLATFORMS, f"raised ceiling on {carrying}, expected {RAISED_LIMITS_PLATFORMS}"
+
+  def test_raised_limits_schedule(self):
+    # The low-speed raise lives in a lookup that only ONE platform may carry, and that panda
+    # cannot see at all -- panda enforces a flat ceiling and trusts opendbc to stay under it.
+    # So there are exactly three ways this fails silently, and each is asserted here:
+    #   1. the schedule leaks onto another Hyundai, which would command 500 where panda
+    #      enforces 384 (or 270, or 170) and every frame would be dropped;
+    #   2. a schedule point sits above panda's flat ceiling, which drops frames on OUR car;
+    #   3. the high-speed end drifts off STEER_MAX, which silently changes freeway behaviour
+    #      and breaks the fail-safe fallback.
+    ceiling = panda_raised_ceiling()
+    sweep = [v / 10.0 for v in range(500)]
+    fingerprint = gen_empty_fingerprint()
+
+    for car_model in CAR:
+      CP = CarInterface.get_params(car_model, fingerprint, [], False, False, False)
+      params = CarControllerParams(CP)
+      car_flag = bool(CP.flags & HyundaiFlags.RAISED_LIMITS)
+
+      if not car_flag:
+        assert params.STEER_MAX_LOOKUP is None, f"{car_model}: carries a torque schedule without the flag"
+        for v in sweep:
+          assert params.steer_max_at(v) == params.STEER_MAX,               f"{car_model}: speed moved the ceiling at {v} m/s without the flag"
+        continue
+
+      assert params.STEER_MAX_LOOKUP is not None, f"{car_model}: raised flag but no schedule"
+      bp, vals = params.STEER_MAX_LOOKUP
+      assert tuple(bp) == RAISED_SCHEDULE_BP, f"{car_model}: breakpoints {bp}"
+
+      # the plateaus, the two breakpoints, and beyond
+      assert params.steer_max_at(0.0) == RAISED_STEER_MAX_LOW_SPEED
+      assert params.steer_max_at(bp[0]) == RAISED_STEER_MAX_LOW_SPEED
+      assert params.steer_max_at(bp[1]) == RAISED_STEER_MAX
+      assert params.steer_max_at(100.0) == RAISED_STEER_MAX
+
+      # (3) the fail-safe property: bypassing the schedule must land on today's behaviour
+      assert params.steer_max_at(bp[1]) == params.STEER_MAX,         f"{car_model}: high-speed end {params.steer_max_at(bp[1])} != STEER_MAX {params.STEER_MAX}"
+
+      # (2) and never above what panda will pass
+      commanded = [params.steer_max_at(v) for v in sweep]
+      assert max(commanded) <= ceiling,         f"{car_model}: commands {max(commanded)} where panda enforces {ceiling}"
+
+      # monotonic, so there is no speed at which slowing down loses authority
+      assert commanded == sorted(commanded, reverse=True), f"{car_model}: schedule is not monotonic"
+
+  def test_the_schedule_reaches_the_wire(self):
+    # Everything above reads values.py. This one RUNS the car: it builds the real
+    # CarInterface, drives the real CarController for long enough that the 3-count-per-frame
+    # rate limiter is no longer what binds, and decodes CR_Lkas_StrToqReq out of the LKAS11
+    # frame the car would actually transmit.
+    #
+    # This exists because the source-text guards cannot see wiring. A carcontroller that
+    # computes steer_max and then forgets to hand it to apply_driver_steer_torque_limits
+    # still contains every string those guards look for, and still silently clips the whole
+    # raise back to 409 -- the schedule would be dead and every other check would stay green.
+    # The same shape of bug was shipped and caught once already on this branch (the
+    # interface.py flag bridge that nothing executed).
+    fp = gen_empty_fingerprint()
+    CP = CarInterface.get_params(CAR.HYUNDAI_ELANTRA_2024, fp, [], alpha_long=False,
+                                 is_release=False, docs=False)
+    CP_SP = CarInterface.get_params_sp(CP, CAR.HYUNDAI_ELANTRA_2024, fp, [], alpha_long=False,
+                                       is_release_sp=False, docs=False)
+    params = CarControllerParams(CP)
+
+    def drive(v_ego_raw, frames=400):
+      CI = CarInterface(CP, CP_SP)
+      CI.CS.out = structs.CarState(vEgoRaw=v_ego_raw, steeringTorque=0.0, steeringAngleDeg=0.0)
+      # the stock signals the carcontroller copies through; zeros, because nothing here reads
+      # them back. defaultdict rather than a literal list so this does not need editing when
+      # create_lkas11's passthrough set changes.
+      CI.CS.lkas11 = defaultdict(int)
+      CI.CS.clu11 = defaultdict(int)
+      CI.CS.is_metric = False
+      CI.CS.main_cruise_enabled = False
+
+      CC = structs.CarControl(enabled=True, latActive=True)
+      CC.actuators.torque = 1.0        # full demand, so the ceiling is what binds
+      CC = CC.as_reader()
+      CC_SP = structs.CarControlSP()
+
+      on_wire, actuators = None, None
+      for i in range(frames):
+        actuators, can_sends = CI.apply(CC, CC_SP, i * 10_000_000)
+        for addr, dat, _bus in can_sends:
+          if addr == 0x340:            # LKAS11
+            word = int.from_bytes(bytes(dat)[0:4], "little")
+            on_wire = ((word >> 16) & 0x7FF) - 1024      # CR_Lkas_StrToqReq, 16|11@1+ (1,-1024)
+      return on_wire, actuators
+
+    for v in (0.0, 5.0, 8.94, (8.94 + 13.41) / 2, 13.41, 25.0, 40.0):
+      expected = params.steer_max_at(v)
+      on_wire, actuators = drive(v)
+
+      assert on_wire == expected,         f"at {v} m/s the wire carries {on_wire}, schedule says {expected}"
+      assert actuators.torqueOutputCan == expected,         f"at {v} m/s torqueOutputCan is {actuators.torqueOutputCan}, schedule says {expected}"
+
+      # And the feedback normalisation must divide by the SAME ceiling the command was built
+      # from. Saturated at any speed, that is 1.0 exactly. If the multiply used the schedule
+      # and the normalisation used the static STEER_MAX, this reads 500/409 = 1.22 at low
+      # speed -- a torque learner fed a demand that never existed.
+      assert abs(actuators.torque - 1.0) < 1e-9,         f"at {v} m/s normalised feedback is {actuators.torque}, not 1.0"
 
   def test_lfahda_mfc_length(self):
     # Three things have to agree per platform and none of them can see the others: the dbc
