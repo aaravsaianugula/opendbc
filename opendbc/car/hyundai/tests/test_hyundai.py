@@ -1,12 +1,13 @@
 import unittest
 
-from opendbc.car import gen_empty_fingerprint
+from opendbc.can import CANPacker
+from opendbc.car import gen_empty_fingerprint, Bus
 from opendbc.car.structs import CarParams
 from opendbc.car.fw_versions import build_fw_dict
 from opendbc.car.hyundai.interface import CarInterface
 from opendbc.car.hyundai.hyundaicanfd import CanBus
 from opendbc.car.hyundai.radar_interface import RADAR_START_ADDR
-from opendbc.car.hyundai.values import CAR, DATE_FW_ECUS, \
+from opendbc.car.hyundai.values import CAR, DATE_FW_ECUS, DBC, \
                                          FW_QUERY_CONFIG, CANFD_FUZZY_WHITELIST, \
                                          PLATFORM_CODE_ECUS, HYUNDAI_VERSION_REQUEST_LONG, \
                                          HyundaiFlags, get_platform_codes, HyundaiSafetyFlags, \
@@ -109,6 +110,26 @@ class TestHyundaiFingerprint(unittest.TestCase):
         assert not (CP.flags & lower), f"{car_model}: raised ceiling on a car panda limits lower"
 
     assert carrying == RAISED_LIMITS_PLATFORMS, f"raised ceiling on {carrying}, expected {RAISED_LIMITS_PLATFORMS}"
+
+  def test_lfahda_mfc_length(self):
+    # Three things have to agree per platform and none of them can see the others: the dbc
+    # (what openpilot packs into 0x485), the safetyParam bit (what panda will let out), and
+    # the car flag that is supposed to drive both. Disagreement is either a car that cannot
+    # show HDA state or a panda allow-list wider than the message it guards, and neither
+    # shows up as a test failure anywhere else.
+    fingerprint = gen_empty_fingerprint()
+    for car_model in CAR:
+      CP = CarInterface.get_params(car_model, fingerprint, [], False, False, False)
+      if CP.flags & HyundaiFlags.CANFD:
+        continue  # LFAHDA_MFC is a CAN-only message
+
+      car_flag = bool(CP.flags & HyundaiFlags.LFAHDA_MFC_8)
+      safety_bit = bool(CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.LFAHDA_MFC_8)
+      assert car_flag == safety_bit, f"{car_model}: flag/safetyParam disagree"
+
+      packed = CANPacker(DBC[car_model][Bus.pt]).make_can_msg("LFAHDA_MFC", 0, {})[1]
+      expected = 8 if car_flag else 4
+      assert len(packed) == expected,              f"{car_model}: dbc packs {len(packed)} bytes, flag says {expected}"
 
   def test_can_features(self):
     for car_model in CAR:

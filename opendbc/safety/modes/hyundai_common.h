@@ -54,6 +54,12 @@ bool hyundai_alt_limits_2 = false;
 extern bool hyundai_raised_limits;
 bool hyundai_raised_limits = false;
 
+// LFAHDA_MFC (0x485) is 8 bytes on the CN7 Elantra bus and 4 on every other Hyundai CAN
+// platform. The TX allow-list has to permit the longer one so the CN7 can send it, so this
+// flag is what keeps the shorter one enforced everywhere else.
+extern bool hyundai_lfahda_mfc_8;
+bool hyundai_lfahda_mfc_8 = false;
+
 // ESCC
 extern bool hyundai_escc;
 bool hyundai_escc = false;
@@ -83,6 +89,7 @@ void hyundai_common_init(uint16_t param) {
   const uint16_t HYUNDAI_PARAM_FCEV_GAS = 256;
   const uint16_t HYUNDAI_PARAM_ALT_LIMITS_2 = 512;
   const uint16_t HYUNDAI_PARAM_RAISED_LIMITS = 1024;
+  const uint16_t HYUNDAI_PARAM_LFAHDA_MFC_8 = 2048;
 
   hyundai_ev_gas_signal = GET_FLAG(param, HYUNDAI_PARAM_EV_GAS);
   hyundai_hybrid_gas_signal = !hyundai_ev_gas_signal && GET_FLAG(param, HYUNDAI_PARAM_HYBRID_GAS);
@@ -92,6 +99,7 @@ void hyundai_common_init(uint16_t param) {
   hyundai_fcev_gas_signal = GET_FLAG(param, HYUNDAI_PARAM_FCEV_GAS);
   hyundai_alt_limits_2 = GET_FLAG(param, HYUNDAI_PARAM_ALT_LIMITS_2);
   hyundai_raised_limits = GET_FLAG(param, HYUNDAI_PARAM_RAISED_LIMITS);
+  hyundai_lfahda_mfc_8 = GET_FLAG(param, HYUNDAI_PARAM_LFAHDA_MFC_8);
 
   hyundai_escc = GET_FLAG(current_safety_param_sp, HYUNDAI_PARAM_SP_ESCC);
   hyundai_longitudinal_main_cruise_toggleable = GET_FLAG(current_safety_param_sp, HYUNDAI_PARAM_SP_LONGITUDINAL_MAIN_CRUISE_TOGGLEABLE);

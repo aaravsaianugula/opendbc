@@ -366,6 +366,29 @@ class TestHyundaiSafetyRaisedLimits(TestHyundaiSafety):
       self._reset_speed_measurement(speed)
       self._assert_ceiling(409, 410, f"at an implausible {speed} m/s")
 
+  def test_lfahda_mfc_length_is_gated(self):
+    """0x485 is 8 bytes on the CN7 bus and 4 everywhere else, and only the flag may widen it.
+
+    The TX allow-list entry had to be widened to 8 so this car can send it at all, which on
+    its own relaxes the check for every Hyundai CAN platform. The tx_hook length test is what
+    keeps 4 enforced for the others, so it needs both directions or it proves nothing: a rule
+    that only ever rejects would also "pass" if it rejected the CN7 too.
+    """
+    for param, expected_len in ((0, 4),
+                                (HyundaiSafetyFlags.LFAHDA_MFC_8, 8)):
+      try:
+        self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, param)
+        self.safety.init_tests()
+        self.safety.set_controls_allowed(1)
+        for length in (4, 8):
+          allowed = self._tx(common.make_msg(0, 0x485, length))
+          self.assertEqual(length == expected_len, allowed,
+                           f"{length}-byte 0x485 with param={param}: expected "
+                           f"{'accept' if length == expected_len else 'reject'}")
+      finally:
+        self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, HyundaiSafetyFlags.RAISED_LIMITS)
+        self.safety.init_tests()
+
   def test_static_limits_have_no_slack(self):
     # Keeps the neighbors honest: upstream's +1 count is on the DYNAMIC path only, and nothing
     # on this branch takes that path any more. A stock Hyundai must accept exactly 384 and
