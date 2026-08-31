@@ -29,10 +29,18 @@ class CarControllerParams:
   #     14-18 m/s  0.09%
   #     18+ m/s    0.02%
   #
-  # RAISED_LIMITS lifts the ceiling to a flat 409 counts at every speed. That is what carrotpilot
-  # ships as its default for every HKG car, with STEER_DELTA_UP/DOWN, STEER_DRIVER_ALLOWANCE,
-  # STEER_DRIVER_MULTIPLIER and STEER_THRESHOLD all left at upstream's values -- checked against
-  # ajouatom/openpilot@carrot-wip rather than assumed.
+  # RAISED_LIMITS lifts the ceiling to a flat 409 counts at every speed. carrotpilot ships 409
+  # as the default in the same `else:` branch, with STEER_DELTA_UP/DOWN, STEER_DRIVER_ALLOWANCE,
+  # STEER_DRIVER_MULTIPLIER and STEER_THRESHOLD all left at upstream's values -- re-checked
+  # against ajouatom/openpilot@carrot-wip on 2026-08-31 rather than assumed.
+  #
+  # Two things about that comparison were previously overstated, and both cut in our favor:
+  #   - carrot's PANDA ceiling is HYUNDAI_LIMITS(512, 10, 10), not 409/3/7. It leaves 103 counts
+  #     of unenforced headroom above what it commands and triples upstream's ramp rates. This
+  #     build enforces exactly 409 with upstream's 3/7, so command and enforcement agree.
+  #   - carrot also raises ALT_LIMITS 270 -> 384 and deletes the ALT_LIMITS_2 branch entirely,
+  #     so those cars fall through to 409 while its panda still enforces 170. That is the exact
+  #     failure the `else:` nesting below prevents here.
   #
   # Flat is a deliberate choice over a speed schedule, and it costs something. STEER_MAX is a
   # GAIN, not a ceiling -- new_torque = actuators.torque * STEER_MAX, and actuators.torque is
@@ -46,7 +54,7 @@ class CarControllerParams:
   # THE FACTORY ENVELOPE IS 157 COUNTS, and an earlier version of this comment was wrong to
   # say it could not be measured. Across 509 recorded segments the camera requests zero in
   # 98.6% of its LKAS11 frames, because it does not actuate while openpilot is engaged -- which
-  # is what that claim was generalised from. But one route, 000000b9--0c339ed202, has openpilot
+  # is what that claim was generalized from. But one route, 000000b9--0c339ed202, has openpilot
   # transmitting zero LKAS11 frames across all 18 of its segments: stock LKAS was driving. In
   # those 40,144 frames CR_Lkas_StrToqReq reaches 157 with CF_Lkas_ActToi set. It is one drive,
   # so 157 is a floor on Hyundai's envelope rather than a proof of its maximum.
@@ -61,9 +69,12 @@ class CarControllerParams:
   #
   # So the rule quoted below is the wrong instrument for this platform, and that is worth
   # saying plainly rather than quietly ignoring it: it was written for cars whose stock LKAS
-  # attempts the same manoeuvres openpilot does. The CN7's does not. 384 (comma's HKG default)
-  # and 409 (carrotpilot's, run by a large Korean CN7 fleet without EPS faults) both rest on
-  # fleet evidence instead, which is the honest basis to cite.
+  # attempts the same maneuvers openpilot does. The CN7's does not. 384 (comma's HKG default)
+  # and 409 both rest on fleet evidence instead, which is the honest basis to cite -- but state
+  # that evidence precisely: carrotpilot has no HYUNDAI_ELANTRA_2024 platform at all, and
+  # neither does comma or sunnypilot upstream. Its CN7 fleet is HYUNDAI_ELANTRA_2021
+  # ("Elantra 2021-23"), the same CN7 generation, pre-facelift. 409 on THIS car is an
+  # extrapolation across a facelift, not a fleet number for it.
   #
   # The MDPS remains the arbiter in every case. It has its own boost curve, fault logic and
   # driver-override arbitration, and it is free to refuse any of this.

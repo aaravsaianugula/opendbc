@@ -3,7 +3,8 @@
 #include "opendbc/safety/declarations.h"
 #include "opendbc/safety/modes/hyundai_common.h"
 
-#define HYUNDAI_LIMITS_COMMON(rate_up, rate_down) \
+#define HYUNDAI_LIMITS(steer, rate_up, rate_down) { \
+  .max_torque = (steer), \
   .max_rate_up = (rate_up), \
   .max_rate_down = (rate_down), \
   .max_rt_delta = 112, \
@@ -15,11 +16,7 @@
   .min_valid_request_frames = 89, \
   .max_invalid_request_frames = 2, \
   .min_valid_request_rt_interval = 810000,  /* 810ms; a ~10% buffer on cutting every 90 frames */ \
-  .has_steer_req_tolerance = true,
-
-#define HYUNDAI_LIMITS(steer, rate_up, rate_down) { \
-  .max_torque = (steer), \
-  HYUNDAI_LIMITS_COMMON(rate_up, rate_down) \
+  .has_steer_req_tolerance = true, \
 }
 
 extern const LongitudinalLimits HYUNDAI_LONG_LIMITS;
@@ -193,13 +190,8 @@ static void hyundai_rx_hook(const CANPacket_t *msg) {
     // sample wheel speed, averaging opposite corners
     if (msg->addr == 0x386U) {
       uint32_t front_left_speed = GET_BYTES(msg, 0, 2) & 0x3FFFU;
-      uint32_t front_right_speed = GET_BYTES(msg, 2, 2) & 0x3FFFU;
-      uint32_t rear_left_speed = GET_BYTES(msg, 4, 2) & 0x3FFFU;
       uint32_t rear_right_speed = GET_BYTES(msg, 6, 2) & 0x3FFFU;
       vehicle_moving = (front_left_speed > HYUNDAI_STANDSTILL_THRSLD) || (rear_right_speed > HYUNDAI_STANDSTILL_THRSLD);
-
-      // average of all 4 wheel speeds. Conversion: raw * 0.03125 / 3.6 = m/s
-      UPDATE_VEHICLE_SPEED((front_left_speed + front_right_speed + rear_left_speed + rear_right_speed) / 4.0 * 0.03125 * KPH_TO_MS);
     }
 
     if (msg->addr == 0x394U) {

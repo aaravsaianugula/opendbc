@@ -10,7 +10,7 @@ from opendbc.car.hyundai.values import CAR, DATE_FW_ECUS, \
                                          FW_QUERY_CONFIG, CANFD_FUZZY_WHITELIST, \
                                          PLATFORM_CODE_ECUS, HYUNDAI_VERSION_REQUEST_LONG, \
                                          HyundaiFlags, get_platform_codes, HyundaiSafetyFlags, \
-                                         NON_SCC_CAR
+                                         NON_SCC_CAR, CarControllerParams
 from opendbc.car.hyundai.fingerprints import FW_VERSIONS
 from opendbc.testing import fuzzy_test
 
@@ -45,7 +45,13 @@ CANFD_EXPECTED_ECUS = {Ecu.fwdCamera, Ecu.fwdRadar}
 # CAN-only feature flags that should not appear on CAN FD platforms
 CAN_FEATURE_FLAGS = (HyundaiFlags.CLUSTER_GEARS | HyundaiFlags.TCU_GEARS | HyundaiFlags.CHECKSUM_CRC8 |
                      HyundaiFlags.CHECKSUM_6B | HyundaiFlags.LEGACY | HyundaiFlags.UNSUPPORTED_LONGITUDINAL |
-                     HyundaiFlags.CAMERA_SCC)
+                     HyundaiFlags.CAMERA_SCC | HyundaiFlags.RAISED_LIMITS)
+
+# The only platforms allowed to command more than the 384-count HKG default. Stated as an
+# explicit set so that widening the raised ceiling to another car is a deliberate, reviewed
+# edit to this line rather than a side effect of adding a flag somewhere else.
+RAISED_LIMITS_PLATFORMS = {CAR.HYUNDAI_ELANTRA_2024}
+RAISED_STEER_MAX = 409
 
 
 def cars_with(flags):
@@ -77,6 +83,32 @@ class TestHyundaiFingerprint(unittest.TestCase):
     for car_model in CAR:
       CP = CarInterface.get_params(car_model, fingerprint, [], False, False, False)
       assert bool(CP.flags & HyundaiFlags.ALT_LIMITS) == bool(CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.ALT_LIMITS)
+
+  def test_raised_limits(self):
+    # The raised ceiling lives in four places that cannot see each other: the platform flag,
+    # the safetyParam bit panda reads, CarControllerParams.STEER_MAX, and the list above.
+    # guards.py checks the source text of the interface.py bridge; this executes it instead,
+    # so moving that line into a branch that never runs for this platform is caught too.
+    fingerprint = gen_empty_fingerprint()
+    carrying = set()
+    for car_model in CAR:
+      CP = CarInterface.get_params(car_model, fingerprint, [], False, False, False)
+      car_flag = bool(CP.flags & HyundaiFlags.RAISED_LIMITS)
+      safety_bit = bool(CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.RAISED_LIMITS)
+      steer_max = CarControllerParams(CP).STEER_MAX
+
+      # without this openpilot commands 409 and panda rejects every frame above 384
+      assert car_flag == safety_bit, f"{car_model}: flag/safetyParam disagree ({car_flag} vs {safety_bit})"
+      # and the flag has to be what actually moves the number
+      assert (steer_max == RAISED_STEER_MAX) == car_flag, f"{car_model}: STEER_MAX {steer_max} with flag {car_flag}"
+      if car_flag:
+        carrying.add(car_model)
+        # only platforms whose stock ceiling is the 384 default may be raised; a car also
+        # carrying CANFD/ALT_LIMITS/ALT_LIMITS_2 would command 409 where panda enforces less
+        lower = HyundaiFlags.CANFD | HyundaiFlags.ALT_LIMITS | HyundaiFlags.ALT_LIMITS_2
+        assert not (CP.flags & lower), f"{car_model}: raised ceiling on a car panda limits lower"
+
+    assert carrying == RAISED_LIMITS_PLATFORMS, f"raised ceiling on {carrying}, expected {RAISED_LIMITS_PLATFORMS}"
 
   def test_can_features(self):
     for car_model in CAR:

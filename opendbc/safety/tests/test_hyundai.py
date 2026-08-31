@@ -348,16 +348,18 @@ class TestHyundaiSafetyRaisedLimits(TestHyundaiSafety):
       self._assert_ceiling(409, 410, f"at {speed} m/s")
 
   def test_cold_start_ceiling(self):
-    # vehicle_speed resets to 0 on init and no speed frame has ever been received. Under the
-    # old schedule this was the permissive end of a descending lookup and needed its own
-    # argument; here there is nothing for it to be the end of.
+    # No speed frame has ever been received. Under the old schedule this was the permissive
+    # end of a descending lookup and needed its own argument; here there is nothing for it to
+    # be the end of, and the mode no longer samples vehicle_speed at all.
     self.safety.init_tests()
     self._assert_ceiling(409, 410, "before any speed frame")
 
   def test_bad_speed_cannot_move_the_ceiling(self):
     # Stale, absurd and reversed-looking speed readings. None of them can move a limit that
-    # never reads the speed. This is the test that would have to grow a case per failure mode
-    # if the ceiling were scheduled.
+    # never reads the speed -- and since this mode stopped calling UPDATE_VEHICLE_SPEED, the
+    # speed is not even recorded. 0x386 is still received here (it feeds vehicle_moving), so
+    # this exercises the real RX path. It is the test that would have to grow a case per
+    # failure mode if the ceiling were scheduled.
     self._reset_speed_measurement(30.)
     self._assert_ceiling(409, 410, "after highway speed, then no further frames (stale)")
     for speed in (0., 200., 1000.):
@@ -365,13 +367,19 @@ class TestHyundaiSafetyRaisedLimits(TestHyundaiSafety):
       self._assert_ceiling(409, 410, f"at an implausible {speed} m/s")
 
   def test_static_limits_have_no_slack(self):
-    # Keeps the neighbours honest: upstream's +1 count is on the DYNAMIC path only, and nothing
+    # Keeps the neighbors honest: upstream's +1 count is on the DYNAMIC path only, and nothing
     # on this branch takes that path any more. A stock Hyundai must accept exactly 384 and
     # reject 385, at any speed.
-    self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, 0)
-    self.safety.init_tests()
-    self._reset_speed_measurement(25.)
-    self._assert_ceiling(384, 385)
+    try:
+      self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, 0)
+      self.safety.init_tests()
+      self._reset_speed_measurement(25.)
+      self._assert_ceiling(384, 385)
+    finally:
+      # this test is the only one that leaves the mode it was given; restore it so the
+      # class stays usable under any runner that does not re-hook between tests
+      self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, HyundaiSafetyFlags.RAISED_LIMITS)
+      self.safety.init_tests()
 
 
 @parameterized_class(LDA_BUTTON)
