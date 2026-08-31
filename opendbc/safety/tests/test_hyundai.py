@@ -383,7 +383,7 @@ class TestHyundaiSafetyRaisedLimits(TestHyundaiSafety):
         for length in (4, 8):
           allowed = self._tx(common.make_msg(0, 0x485, length))
           self.assertEqual(length == expected_len, allowed,
-                           f"{length}-byte 0x485 with param={param}: expected "
+                           f"{length}-byte 0x485 with param={param}: expected " +
                            f"{'accept' if length == expected_len else 'reject'}")
       finally:
         self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, HyundaiSafetyFlags.RAISED_LIMITS)
