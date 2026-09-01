@@ -273,13 +273,13 @@ class TestHyundaiSafetyRaisedLimits(TestHyundaiSafety):
   """The CN7 Elantra's raised steering torque ceiling: FLAT here, SCHEDULED in opendbc.
 
   Panda enforces one number at every speed. opendbc commands a speed schedule underneath it --
-  500 counts below 20 mph ramping to 409 by 30 mph -- and panda cannot see that schedule at
+  450 counts below 20 mph ramping to 409 by 30 mph -- and panda cannot see that schedule at
   all. The asymmetry is the design: the schedule has to be right about the speed to steer
   well, but panda does not have to be right about the speed to be safe, so no speed reading
   enters this path and none of the dynamic path's -1 m/s fudge or +1 count of slack applies.
 
   What it costs is unenforced headroom, and the amount is asserted rather than waved at:
-  12 counts below 20 mph and 103 above. That is carrotpilot's shape, and this file previously
+  62 counts below 20 mph and 103 above. That is carrotpilot's shape, and this file previously
   argued against it. The argument was fair; the trade was made deliberately.
 
   Three lines of class attributes is still the entire configuration, so
@@ -297,7 +297,7 @@ class TestHyundaiSafetyRaisedLimits(TestHyundaiSafety):
   # opendbc's schedule, restated. Read from CarControllerParams in the tests below as well --
   # the literals are here so a test that only compared the two sides against each other cannot
   # stay green while both move together.
-  SCHEDULE_PEAK = 500
+  SCHEDULE_PEAK = 450
   SCHEDULE_FLOOR = 409
 
   @classmethod
@@ -357,7 +357,7 @@ class TestHyundaiSafetyRaisedLimits(TestHyundaiSafety):
 
     # And state the unenforced headroom rather than leaving it implicit. If either number
     # moves, someone has changed how much of the envelope is unpoliced and should say so.
-    self.assertEqual(self.MAX_TORQUE - self.SCHEDULE_PEAK, 12)
+    self.assertEqual(self.MAX_TORQUE - self.SCHEDULE_PEAK, 62)
     self.assertEqual(self.MAX_TORQUE - self.SCHEDULE_FLOOR, 103)
 
     self._assert_ceiling(512, 513)

@@ -62,7 +62,7 @@ RAISED_LIMITS_PLATFORMS = {CAR.HYUNDAI_ELANTRA_2024}
 # consumer reading the attribute directly -- the car falls back to exactly the flat 409 it has
 # been driving, not to the raised low-speed value at every speed.
 RAISED_STEER_MAX = 409
-RAISED_STEER_MAX_LOW_SPEED = 500
+RAISED_STEER_MAX_LOW_SPEED = 450
 RAISED_SCHEDULE_BP = (8.94, 13.41)   # 20 mph and 30 mph
 
 
@@ -144,7 +144,7 @@ class TestHyundaiFingerprint(unittest.TestCase):
     # The low-speed raise lives in a lookup that only ONE platform may carry, and that panda
     # cannot see at all -- panda enforces a flat ceiling and trusts opendbc to stay under it.
     # So there are exactly three ways this fails silently, and each is asserted here:
-    #   1. the schedule leaks onto another Hyundai, which would command 500 where panda
+    #   1. the schedule leaks onto another Hyundai, which would command 450 where panda
     #      enforces 384 (or 270, or 170) and every frame would be dropped;
     #   2. a schedule point sits above panda's flat ceiling, which drops frames on OUR car;
     #   3. the high-speed end drifts off STEER_MAX, which silently changes freeway behaviour
@@ -226,18 +226,24 @@ class TestHyundaiFingerprint(unittest.TestCase):
           if addr == 0x340:            # LKAS11
             word = int.from_bytes(bytes(dat)[0:4], "little")
             on_wire = ((word >> 16) & 0x7FF) - 1024      # CR_Lkas_StrToqReq, 16|11@1+ (1,-1024)
-      return on_wire, actuators
+      # vEgoRaw is a FLOAT32 in the capnp schema, so what carcontroller evaluated the schedule
+      # on is not the double this test passed in -- 11.175 stores as 11.175000190734863. That
+      # is 1.9e-7 high, which drops the interpolation from 429.500000 to 429.499998 and takes
+      # banker's rounding the other way: 429 on the wire against 430 from the double. One count,
+      # only at a speed landing exactly on a .5 boundary, and the car is right -- so the oracle
+      # has to be the speed the CAR saw, not the one the test asked for.
+      return on_wire, actuators, float(CI.CS.out.vEgoRaw)
 
     for v in (0.0, 5.0, 8.94, (8.94 + 13.41) / 2, 13.41, 25.0, 40.0):
-      expected = params.steer_max_at(v)
-      on_wire, actuators = drive(v)
+      on_wire, actuators, v_seen = drive(v)
+      expected = params.steer_max_at(v_seen)
 
       assert on_wire == expected,         f"at {v} m/s the wire carries {on_wire}, schedule says {expected}"
       assert actuators.torqueOutputCan == expected,         f"at {v} m/s torqueOutputCan is {actuators.torqueOutputCan}, schedule says {expected}"
 
       # And the feedback normalisation must divide by the SAME ceiling the command was built
       # from. Saturated at any speed, that is 1.0 exactly. If the multiply used the schedule
-      # and the normalisation used the static STEER_MAX, this reads 500/409 = 1.22 at low
+      # and the normalisation used the static STEER_MAX, this reads 450/409 = 1.10 at low
       # speed -- a torque learner fed a demand that never existed.
       assert abs(actuators.torque - 1.0) < 1e-9,         f"at {v} m/s normalised feedback is {actuators.torque}, not 1.0"
 
