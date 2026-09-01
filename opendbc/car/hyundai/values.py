@@ -32,16 +32,25 @@ class CarControllerParams:
   # RAISED_LIMITS lifts the ceiling to a FLAT 409 counts at every speed -- carrotpilot's
   # number, and its shape: panda enforces a permissive flat 512 while opendbc commands 409.
   #
-  # 409 IS A HARDWARE BOUNDARY, NOT A PREFERENCE, and that is the whole reason this is flat.
-  # A speed schedule was built, gated and driven here first -- 500 counts below 20 mph ramping
-  # to 409 by 30 mph, then lowered to 450. BOTH RAISED CEILINGS THREW AN EPS FAULT ON THE CAR:
-  # the MDPS refuses to deliver what it is asked for above 409 and drops out, and the fault
-  # clears once the ceiling is back at 409. Measured on this car, twice, at 500 and at 450.
+  # RAISING THIS ABOVE 409 PRODUCED EPS FAULTS ON THIS CAR, TWICE. A speed schedule was built
+  # and driven -- 500 counts below 20 mph ramping to 409 by 30 mph, then lowered to 450 -- and
+  # both threw an EPS fault, the MDPS dropping out rather than delivering. Coming back to 409
+  # cleared it both times.
   #
-  # So there is no ceiling above 409 to schedule TOWARDS. The schedule is not merely reverted,
-  # it is ruled out: raising this number does not buy authority, it buys a steering dropout in
-  # the low-speed band the raise was meant to help. Anyone reading this and reaching for a
-  # lookup table should stop here -- the experiment has been run.
+  # BE PRECISE ABOUT WHAT THAT DOES AND DOES NOT ESTABLISH. Both attempts used the SAME
+  # speed-scheduled machinery, so the experiment never separated the two candidate causes:
+  #   (a) the VALUE -- the MDPS will not deliver more than ~409 and faults when asked, or
+  #   (b) the MECHANISM -- a ceiling that moves with vEgoRaw upset it, and a FLAT ceiling
+  #       above 409 was never actually tried.
+  # A flat build above 409 has never been driven. Two data points sharing one implementation
+  # cannot tell (a) from (b), and an earlier version of this comment asserted (a) as settled
+  # fact. It is not.
+  #
+  # What IS measured: flat 409 has ~1.59M engaged frames across 24 recorded routes with THREE
+  # EPS fault frames in total, and the ceiling is genuinely reached (2.2% of engaged frames sit
+  # in the top 25-count bin). Flat 409 is known-good. Anything above it is unproven and has
+  # twice coincided with faults, so it stays here until a deliberate instrumented test says
+  # otherwise -- not because the question is closed, but because it is open and untested.
   #
   # Flat also costs nothing to be right about. Nothing the car commands depends on a speed
   # reading: no interpolation, no breakpoint, no half-count rounding boundary, and nothing a

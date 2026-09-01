@@ -229,12 +229,15 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
   // what lets opendbc's number move without a reflash. Our rates stay 3/7, not carrot's 10/10.
   //
   // THE 103 COUNTS BETWEEN 409 AND 512 ARE UNENFORCED, and that gap is worse than it looks.
-  // 500 and 450 were both driven on this car and BOTH THREW AN EPS FAULT -- the MDPS refuses
-  // above 409 and drops steering, recovering only once the ceiling is back at 409. So this
-  // ceiling does not police the band the car actually fails in; nothing here will stop a
-  // regression that commands 450. What holds the line is CarControllerParams.STEER_MAX in
-  // opendbc/car/hyundai/values.py and the tests around it, which is why they assert the
-  // literal 409 rather than merely "at or under panda".
+  // 500 and 450 were both driven on this car and BOTH COINCIDED WITH EPS FAULTS, the MDPS
+  // dropping out rather than delivering; 409 cleared it both times. Whether the cause was the
+  // value or the speed-scheduled machinery both attempts shared is NOT established -- see the
+  // CarControllerParams comment in values.py. Either way, 410-512 is a band this car has never
+  // steered in successfully, and panda does not police it.
+  //
+  // So nothing here will stop a regression that commands 450. What holds the line is
+  // CarControllerParams.STEER_MAX in opendbc/car/hyundai/values.py and the tests around it,
+  // which is why they assert the literal 409 rather than merely "at or under panda".
   //
   // opendbc/car/hyundai/tests/test_hyundai.py reads this number off this line with an ANCHORED
   // regex. Keep the declaration at the start of a line: an unanchored read would take a stale
