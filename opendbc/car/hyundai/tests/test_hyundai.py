@@ -71,7 +71,14 @@ def panda_raised_ceiling():
   # "opendbc schedules, panda is flat" fails is a schedule point above what panda will pass,
   # and a hand-copied constant here would agree with itself while the two drifted apart.
   src = Path(__file__).parents[3] / "safety" / "modes" / "hyundai.h"
-  m = re.search(r"HYUNDAI_STEERING_LIMITS_RAISED\s*=\s*HYUNDAI_LIMITS\(\s*(\d+)", src.read_text())
+  # Anchored to a real DECLARATION, at the start of a line. An unanchored search takes the first
+  # match anywhere in the file, so a stale value left in a comment above the live line -- exactly
+  # what someone writes when lowering it -- is read instead of the value in force, and this gate
+  # then passes while panda drops every frame the schedule commands above the real ceiling. It
+  # fails open in one direction only, which is why the reverse-direction decoy did not expose it.
+  pattern = (r"^\s*const\s+TorqueSteeringLimits\s+HYUNDAI_STEERING_LIMITS_RAISED\s*=" +
+             r"\s*HYUNDAI_LIMITS\(\s*(\d+)")
+  m = re.search(pattern, src.read_text(), re.MULTILINE)
   assert m, f"could not find HYUNDAI_STEERING_LIMITS_RAISED in {src}"
   return int(m.group(1))
 
