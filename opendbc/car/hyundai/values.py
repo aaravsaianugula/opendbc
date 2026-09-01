@@ -31,41 +31,25 @@ class CarControllerParams:
   #     14-18 m/s  0.09%
   #     18+ m/s    0.02%
   #
-  # RAISED_LIMITS lifts the ceiling. It was a flat 409 at every speed; road testing that build
-  # showed the controller reaching it below 20 mph, so the ceiling is now SPEED-SCHEDULED:
-  # 450 counts below 8.94 m/s (20 mph), ramping to 409 by 13.41 m/s (30 mph), flat 409 above.
-  # STEER_MAX_LOOKUP holds the schedule and steer_max_at() evaluates it.
+  # RAISED_LIMITS lifts the ceiling to a FLAT 409 counts at every speed -- carrotpilot's
+  # number, and its shape: panda enforces a permissive flat 512 while opendbc commands 409.
   #
-  # WHAT THE RAMP IS FOR. STEER_MAX is a GAIN, not a clamp, so the step from 450 to 409 would
-  # weaken every command by 9% the instant the car crossed 20 mph. Interpolating over 20-30
-  # mph spreads that over ~4.5 m/s instead of one frame. The old schedule ramped for the same
-  # reason (409 -> 384 between 8 and 16 m/s).
+  # A speed schedule (450 under 20 mph ramping to 409 by 30 mph) was built, gated and driven
+  # here first. It was reverted to flat 409 deliberately. What flat buys is that nothing about
+  # what the car commands depends on a speed reading: no interpolation, no breakpoint, no
+  # half-count rounding boundary, and nothing a noisy, stale, dropped or spoofed vEgoRaw can
+  # move. A schedule has to be right about the speed to be right at all; this only has to be
+  # right about one number. STEER_MAX_LOOKUP is left unassigned, so steer_max_at() returns this
+  # static value at every speed and the carcontroller's per-frame ceiling is a no-op.
   #
-  # STEER_MAX STAYS 409 AND THAT IS DELIBERATE: it is the HIGH-SPEED END of the schedule, not
-  # its maximum. Rivian does the same (STEER_MAX = 250 under [9,17],[350,250]). Anything that
-  # bypasses the schedule -- a regression that stops carcontroller passing steer_max, or a
-  # consumer reading the attribute directly -- then lands on exactly the flat 409 this car has
-  # already driven, rather than commanding the raised low-speed value on the freeway.
+  # PANDA IS FLAT AND PERMISSIVE, AT 512, and stays there. That leaves 103 counts of unenforced
+  # headroom -- carrotpilot's tradeoff, and a real cost, stated rather than argued away. It is
+  # what lets the ceiling move without reflashing, and it is why the tests below assert the
+  # relationship (command <= enforcement) rather than equality.
   #
-  # PANDA IS FLAT AND PERMISSIVE, AT 512. It cannot see the schedule, so it enforces a single
-  # ceiling above every point of it and opendbc is the operating point. That is carrotpilot's
-  # shape, and an earlier version of this comment criticised it for exactly the property this
-  # build now has: 62 counts of unenforced headroom below 20 mph and 103 above. The criticism
-  # was fair and it now applies here. What is bought for it is that no speed reading enters
-  # panda at all -- no interpolation, no -1 m/s speed fudge, no +1 count of slack, and nothing
-  # a noisy, stale, dropped or spoofed speed can move on the enforcement side. The schedule
-  # has to be right about the speed to steer well; panda does not have to be right about the
-  # speed to be safe. test_raised_limits_schedule is what holds the two together: it reads
-  # panda's number out of hyundai.h and fails if any schedule point rises above it.
-  #
-  # WHAT IT COSTS, in the regime it applies to. Every sub-20mph command is 10.0% stronger, not
-  # only the saturated ones. Driver override still BEGINS at -50 counts (STEER_DRIVER_ALLOWANCE
-  # does not scale), but the point of FULL yield, -(STEER_MAX/2) - 50, moves from -254.5 to
-  # -275: below 20 mph the driver must apply 8% more opposing torque before the system lets
-  # go completely. Above 30 mph nothing changes, bit for bit.
-  #
-  # NO FLEET RUNS THIS. carrotpilot's CN7 fleet is panda 512 / opendbc 409; the "a large fleet
-  # already runs this number" argument carried 409 and is NOT available for 450.
+  # WHAT IT COSTS vs the 384 stock ceiling: every command is 6.5% stronger at every speed.
+  # Driver override still BEGINS at -50 counts, and FULL yield -- -(STEER_MAX/2) - 50 -- sits at
+  # -254.5 rather than -242.
   #
   # WHERE 409 CAME FROM, since it is still the high-speed end: carrotpilot ships it as the
   # default in the same `else:` branch, with STEER_DELTA_UP/DOWN, STEER_DRIVER_ALLOWANCE,
@@ -164,11 +148,9 @@ class CarControllerParams:
       # Only platforms whose stock ceiling is this 384 may raise it, and living inside this
       # branch is what guarantees that. Assigned after the chain instead, RAISED_LIMITS would
       # silently outrank CANFD, the 255 list, ALT_LIMITS and ALT_LIMITS_2 -- a car carrying
-      # both flags would command up to 450 while panda enforced 170. The schedule below is
-      # assigned in the same branch for the same reason.
+      # both flags would command 409 while panda enforced 170.
       if CP.flags & HyundaiFlags.RAISED_LIMITS:
-        self.STEER_MAX = 409                                  # the high-speed end, and the fallback
-        self.STEER_MAX_LOOKUP = [8.94, 13.41], [450, 409]     # 20 mph -> 30 mph
+        self.STEER_MAX = 409
 
 
 class HyundaiSafetyFlags(IntFlag):

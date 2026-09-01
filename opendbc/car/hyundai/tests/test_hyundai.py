@@ -56,20 +56,16 @@ CAN_FEATURE_FLAGS = (HyundaiFlags.CLUSTER_GEARS | HyundaiFlags.TCU_GEARS | Hyund
 # edit to this line rather than a side effect of adding a flag somewhere else.
 RAISED_LIMITS_PLATFORMS = {CAR.HYUNDAI_ELANTRA_2024}
 
-# STEER_MAX is the HIGH-SPEED end of the schedule, not its maximum. That is deliberate and it
-# is also what Rivian does (STEER_MAX = 250 under STEER_MAX_LOOKUP = [9,17],[350,250]): if the
-# schedule is ever bypassed -- a regression that stops carcontroller passing steer_max, or any
-# consumer reading the attribute directly -- the car falls back to exactly the flat 409 it has
-# been driving, not to the raised low-speed value at every speed.
+# The ceiling is FLAT: 409 at every speed, with no lookup. steer_max_at() therefore returns
+# this static value everywhere, and test_raised_limits_schedule asserts NO platform carries a
+# schedule -- the machinery exists generically but must stay inert on this branch.
 RAISED_STEER_MAX = 409
-RAISED_STEER_MAX_LOW_SPEED = 450
-RAISED_SCHEDULE_BP = (8.94, 13.41)   # 20 mph and 30 mph
 
 
 def panda_raised_ceiling():
-  # Read panda's flat ceiling out of the C source rather than copying the number. The one way
-  # "opendbc schedules, panda is flat" fails is a schedule point above what panda will pass,
-  # and a hand-copied constant here would agree with itself while the two drifted apart.
+  # Read panda's ceiling out of the C source rather than copying the number. opendbc commands
+  # 409 and panda enforces 512, so the two are deliberately NOT equal -- a hand-copied
+  # constant here would agree with itself while the two drifted apart.
   src = Path(__file__).parents[3] / "safety" / "modes" / "hyundai.h"
   # Anchored to a real DECLARATION, at the start of a line. An unanchored search takes the first
   # match anywhere in the file, so a stale value left in a comment above the live line -- exactly
@@ -128,8 +124,8 @@ class TestHyundaiFingerprint(unittest.TestCase):
 
       # without this openpilot commands 409 and panda rejects every frame above 384
       assert car_flag == safety_bit, f"{car_model}: flag/safetyParam disagree ({car_flag} vs {safety_bit})"
-      # and the flag has to be what actually moves the number. STEER_MAX is the high-speed
-      # end of the schedule; test_raised_limits_schedule covers the speed-dependent part.
+      # and the flag has to be what actually moves the number. The ceiling is flat, so this
+      # is the whole of it; test_raised_limits_schedule proves no schedule exists.
       assert (steer_max == RAISED_STEER_MAX) == car_flag, f"{car_model}: STEER_MAX {steer_max} with flag {car_flag}"
       if car_flag:
         carrying.add(car_model)
@@ -141,14 +137,13 @@ class TestHyundaiFingerprint(unittest.TestCase):
     assert carrying == RAISED_LIMITS_PLATFORMS, f"raised ceiling on {carrying}, expected {RAISED_LIMITS_PLATFORMS}"
 
   def test_raised_limits_schedule(self):
-    # The low-speed raise lives in a lookup that only ONE platform may carry, and that panda
-    # cannot see at all -- panda enforces a flat ceiling and trusts opendbc to stay under it.
-    # So there are exactly three ways this fails silently, and each is asserted here:
-    #   1. the schedule leaks onto another Hyundai, which would command 450 where panda
-    #      enforces 384 (or 270, or 170) and every frame would be dropped;
-    #   2. a schedule point sits above panda's flat ceiling, which drops frames on OUR car;
-    #   3. the high-speed end drifts off STEER_MAX, which silently changes freeway behaviour
-    #      and breaks the fail-safe fallback.
+    # The ceiling is FLAT. No Hyundai may carry a torque schedule, and the raised platform's
+    # single ceiling must sit under what panda will pass -- read out of hyundai.h rather than
+    # copied, so the two cannot drift together.
+    #
+    # This is the inverse of what it asserted while the speed schedule was on the car. The
+    # machinery it used (steer_max_at, the carcontroller's per-frame ceiling) is still here and
+    # is generic upstream code; what must not come back is a LOOKUP on this branch.
     ceiling = panda_raised_ceiling()
     sweep = [v / 10.0 for v in range(500)]
     fingerprint = gen_empty_fingerprint()
@@ -156,33 +151,14 @@ class TestHyundaiFingerprint(unittest.TestCase):
     for car_model in CAR:
       CP = CarInterface.get_params(car_model, fingerprint, [], False, False, False)
       params = CarControllerParams(CP)
-      car_flag = bool(CP.flags & HyundaiFlags.RAISED_LIMITS)
 
-      if not car_flag:
-        assert params.STEER_MAX_LOOKUP is None, f"{car_model}: carries a torque schedule without the flag"
-        for v in sweep:
-          assert params.steer_max_at(v) == params.STEER_MAX,               f"{car_model}: speed moved the ceiling at {v} m/s without the flag"
-        continue
+      assert params.STEER_MAX_LOOKUP is None, f"{car_model}: carries a torque schedule"
+      for v in sweep:
+        assert params.steer_max_at(v) == params.STEER_MAX,           f"{car_model}: speed moved the ceiling at {v} m/s"
 
-      assert params.STEER_MAX_LOOKUP is not None, f"{car_model}: raised flag but no schedule"
-      bp, vals = params.STEER_MAX_LOOKUP
-      assert tuple(bp) == RAISED_SCHEDULE_BP, f"{car_model}: breakpoints {bp}"
-
-      # the plateaus, the two breakpoints, and beyond
-      assert params.steer_max_at(0.0) == RAISED_STEER_MAX_LOW_SPEED
-      assert params.steer_max_at(bp[0]) == RAISED_STEER_MAX_LOW_SPEED
-      assert params.steer_max_at(bp[1]) == RAISED_STEER_MAX
-      assert params.steer_max_at(100.0) == RAISED_STEER_MAX
-
-      # (3) the fail-safe property: bypassing the schedule must land on today's behaviour
-      assert params.steer_max_at(bp[1]) == params.STEER_MAX,         f"{car_model}: high-speed end {params.steer_max_at(bp[1])} != STEER_MAX {params.STEER_MAX}"
-
-      # (2) and never above what panda will pass
-      commanded = [params.steer_max_at(v) for v in sweep]
-      assert max(commanded) <= ceiling,         f"{car_model}: commands {max(commanded)} where panda enforces {ceiling}"
-
-      # monotonic, so there is no speed at which slowing down loses authority
-      assert commanded == sorted(commanded, reverse=True), f"{car_model}: schedule is not monotonic"
+      if CP.flags & HyundaiFlags.RAISED_LIMITS:
+        assert params.STEER_MAX == RAISED_STEER_MAX
+        assert params.STEER_MAX <= ceiling,           f"{car_model}: commands {params.STEER_MAX} where panda enforces {ceiling}"
 
   def test_the_schedule_reaches_the_wire(self):
     # Everything above reads values.py. This one RUNS the car: it builds the real
