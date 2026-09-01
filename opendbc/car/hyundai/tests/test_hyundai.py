@@ -56,9 +56,10 @@ CAN_FEATURE_FLAGS = (HyundaiFlags.CLUSTER_GEARS | HyundaiFlags.TCU_GEARS | Hyund
 # edit to this line rather than a side effect of adding a flag somewhere else.
 RAISED_LIMITS_PLATFORMS = {CAR.HYUNDAI_ELANTRA_2024}
 
-# The ceiling is FLAT: 409 at every speed, with no lookup. steer_max_at() therefore returns
-# this static value everywhere, and test_raised_limits_schedule asserts NO platform carries a
-# schedule -- the machinery exists generically but must stay inert on this branch.
+# The ceiling is FLAT: 409 at every speed, and there is no mechanism by which it could be
+# anything else -- CarControllerParams carries no lookup and the carcontroller is byte-for-byte
+# upstream's. 409 is where the CN7's EPS stops faulting (500 and 450 both threw a fault on the
+# car), so this is a measured hardware boundary, not a tuning choice.
 RAISED_STEER_MAX = 409
 
 
@@ -70,7 +71,7 @@ def panda_raised_ceiling():
   # Anchored to a real DECLARATION, at the start of a line. An unanchored search takes the first
   # match anywhere in the file, so a stale value left in a comment above the live line -- exactly
   # what someone writes when lowering it -- is read instead of the value in force, and this gate
-  # then passes while panda drops every frame the schedule commands above the real ceiling. It
+  # then passes while panda drops every frame opendbc commands above the real ceiling. It
   # fails open in one direction only, which is why the reverse-direction decoy did not expose it.
   pattern = (r"^\s*const\s+TorqueSteeringLimits\s+HYUNDAI_STEERING_LIMITS_RAISED\s*=" +
              r"\s*HYUNDAI_LIMITS\(\s*(\d+)")
@@ -136,48 +137,58 @@ class TestHyundaiFingerprint(unittest.TestCase):
 
     assert carrying == RAISED_LIMITS_PLATFORMS, f"raised ceiling on {carrying}, expected {RAISED_LIMITS_PLATFORMS}"
 
-  def test_raised_limits_schedule(self):
-    # The ceiling is FLAT. No Hyundai may carry a torque schedule, and the raised platform's
-    # single ceiling must sit under what panda will pass -- read out of hyundai.h rather than
-    # copied, so the two cannot drift together.
+  def test_no_hyundai_carries_a_torque_schedule(self):
+    # A speed-scheduled ceiling was built and driven here, and the EPS faulted at both 500 and
+    # 450. It is not coming back, so what this asserts is that the MECHANISM is absent: no
+    # lookup attribute, and a carcontroller with no per-frame ceiling. Text-level, because an
+    # attribute that does not exist cannot be swept for.
     #
-    # This is the inverse of what it asserted while the speed schedule was on the car. The
-    # machinery it used (steer_max_at, the carcontroller's per-frame ceiling) is still here and
-    # is generic upstream code; what must not come back is a LOOKUP on this branch.
+    # This is deliberately cheap. The expensive per-platform sweep it replaced could only ever
+    # prove that a thing which does not exist did not do anything.
+    values = (Path(__file__).parents[1] / "values.py").read_text()
+    carctl = (Path(__file__).parents[1] / "carcontroller.py").read_text()
+    for dead in ("STEER_MAX_LOOKUP", "steer_max_at"):
+      assert dead not in values, f"values.py carries schedule machinery: {dead}"
+      assert dead not in carctl, f"carcontroller.py carries schedule machinery: {dead}"
+    assert "actuators.torque * self.params.STEER_MAX" in carctl,       "carcontroller no longer multiplies by the static ceiling"
+
+  def test_the_raised_ceiling_sits_under_what_panda_passes(self):
+    # The raised platform's single ceiling against panda's, read out of hyundai.h rather than
+    # copied so the two cannot drift together. They are deliberately NOT equal: opendbc
+    # commands 409, panda enforces 512, and the 103 counts between them are unenforced.
+    #
+    # The literal 409 is asserted as well as the relationship, and that matters more than it
+    # used to. Panda's 512 sits above the band the EPS faults in, so "at or under panda" would
+    # happily pass a 450 that stops the car steering. The literal is the real check.
     ceiling = panda_raised_ceiling()
-    sweep = [v / 10.0 for v in range(500)]
     fingerprint = gen_empty_fingerprint()
 
     for car_model in CAR:
       CP = CarInterface.get_params(car_model, fingerprint, [], False, False, False)
-      params = CarControllerParams(CP)
-
-      assert params.STEER_MAX_LOOKUP is None, f"{car_model}: carries a torque schedule"
-      for v in sweep:
-        assert params.steer_max_at(v) == params.STEER_MAX,           f"{car_model}: speed moved the ceiling at {v} m/s"
-
       if CP.flags & HyundaiFlags.RAISED_LIMITS:
+        params = CarControllerParams(CP)
         assert params.STEER_MAX == RAISED_STEER_MAX
         assert params.STEER_MAX <= ceiling,           f"{car_model}: commands {params.STEER_MAX} where panda enforces {ceiling}"
 
-  def test_the_schedule_reaches_the_wire(self):
-    # Everything above reads values.py. This one RUNS the car: it builds the real
-    # CarInterface, drives the real CarController for long enough that the 3-count-per-frame
-    # rate limiter is no longer what binds, and decodes CR_Lkas_StrToqReq out of the LKAS11
-    # frame the car would actually transmit.
+  def test_the_ceiling_reaches_the_wire(self):
+    # Everything above reads source. This one RUNS the car: it builds the real CarInterface,
+    # drives the real CarController for long enough that the 3-count-per-frame rate limiter is
+    # no longer what binds, and decodes CR_Lkas_StrToqReq out of the LKAS11 frame the car would
+    # actually transmit.
     #
-    # This exists because the source-text guards cannot see wiring. A carcontroller that
-    # computes steer_max and then forgets to hand it to apply_driver_steer_torque_limits
-    # still contains every string those guards look for, and still silently clips the whole
-    # raise back to 409 -- the schedule would be dead and every other check would stay green.
-    # The same shape of bug was shipped and caught once already on this branch (the
-    # interface.py flag bridge that nothing executed).
+    # This exists because the source-text guards cannot see wiring. Every check above can stay
+    # green while the number that reaches CAN is something else entirely -- that exact bug
+    # shipped once on this branch (the interface.py flag bridge that nothing executed). It is
+    # the only check that proves 409 is what the car sends.
+    #
+    # The speed sweep is kept even though the ceiling is flat: a flat ceiling is a CLAIM about
+    # every speed, and this is what tests it. If a lookup ever comes back, the wire changes
+    # here first.
     fp = gen_empty_fingerprint()
     CP = CarInterface.get_params(CAR.HYUNDAI_ELANTRA_2024, fp, [], alpha_long=False,
                                  is_release=False, docs=False)
     CP_SP = CarInterface.get_params_sp(CP, CAR.HYUNDAI_ELANTRA_2024, fp, [], alpha_long=False,
                                        is_release_sp=False, docs=False)
-    params = CarControllerParams(CP)
 
     def drive(v_ego_raw, frames=400):
       CI = CarInterface(CP, CP_SP)
@@ -202,25 +213,20 @@ class TestHyundaiFingerprint(unittest.TestCase):
           if addr == 0x340:            # LKAS11
             word = int.from_bytes(bytes(dat)[0:4], "little")
             on_wire = ((word >> 16) & 0x7FF) - 1024      # CR_Lkas_StrToqReq, 16|11@1+ (1,-1024)
-      # vEgoRaw is a FLOAT32 in the capnp schema, so what carcontroller evaluated the schedule
-      # on is not the double this test passed in -- 11.175 stores as 11.175000190734863. That
-      # is 1.9e-7 high, which drops the interpolation from 429.500000 to 429.499998 and takes
-      # banker's rounding the other way: 429 on the wire against 430 from the double. One count,
-      # only at a speed landing exactly on a .5 boundary, and the car is right -- so the oracle
-      # has to be the speed the CAR saw, not the one the test asked for.
-      return on_wire, actuators, float(CI.CS.out.vEgoRaw)
+      return on_wire, actuators
 
-    for v in (0.0, 5.0, 8.94, (8.94 + 13.41) / 2, 13.41, 25.0, 40.0):
-      on_wire, actuators, v_seen = drive(v)
-      expected = params.steer_max_at(v_seen)
+    # Includes the breakpoints the retired schedule used (8.94 and 13.41 m/s) precisely because
+    # they are where a reintroduced lookup would bend. Under a flat ceiling they are ordinary
+    # speeds and must be indistinguishable from the rest.
+    for v in (0.0, 5.0, 8.94, 11.175, 13.41, 25.0, 40.0):
+      on_wire, actuators = drive(v)
 
-      assert on_wire == expected,         f"at {v} m/s the wire carries {on_wire}, schedule says {expected}"
-      assert actuators.torqueOutputCan == expected,         f"at {v} m/s torqueOutputCan is {actuators.torqueOutputCan}, schedule says {expected}"
+      assert on_wire == RAISED_STEER_MAX,         f"at {v} m/s the wire carries {on_wire}, expected a flat {RAISED_STEER_MAX}"
+      assert actuators.torqueOutputCan == RAISED_STEER_MAX,         f"at {v} m/s torqueOutputCan is {actuators.torqueOutputCan}, expected {RAISED_STEER_MAX}"
 
-      # And the feedback normalisation must divide by the SAME ceiling the command was built
-      # from. Saturated at any speed, that is 1.0 exactly. If the multiply used the schedule
-      # and the normalisation used the static STEER_MAX, this reads 450/409 = 1.10 at low
-      # speed -- a torque learner fed a demand that never existed.
+      # And the feedback normalisation must divide by the ceiling the command was built from.
+      # Saturated, that is 1.0 exactly. Dividing by anything else feeds the torque learner a
+      # demand that never existed.
       assert abs(actuators.torque - 1.0) < 1e-9,         f"at {v} m/s normalised feedback is {actuators.torque}, not 1.0"
 
   def test_lfahda_mfc_length(self):

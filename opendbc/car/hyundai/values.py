@@ -2,8 +2,6 @@ import re
 from dataclasses import dataclass, field
 from enum import IntFlag
 
-import numpy as np
-
 from opendbc.car import Bus, CarSpecs, DbcDict, PlatformConfig, Platforms, uds
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.structs import CarParams
@@ -34,18 +32,26 @@ class CarControllerParams:
   # RAISED_LIMITS lifts the ceiling to a FLAT 409 counts at every speed -- carrotpilot's
   # number, and its shape: panda enforces a permissive flat 512 while opendbc commands 409.
   #
-  # A speed schedule (450 under 20 mph ramping to 409 by 30 mph) was built, gated and driven
-  # here first. It was reverted to flat 409 deliberately. What flat buys is that nothing about
-  # what the car commands depends on a speed reading: no interpolation, no breakpoint, no
-  # half-count rounding boundary, and nothing a noisy, stale, dropped or spoofed vEgoRaw can
-  # move. A schedule has to be right about the speed to be right at all; this only has to be
-  # right about one number. STEER_MAX_LOOKUP is left unassigned, so steer_max_at() returns this
-  # static value at every speed and the carcontroller's per-frame ceiling is a no-op.
+  # 409 IS A HARDWARE BOUNDARY, NOT A PREFERENCE, and that is the whole reason this is flat.
+  # A speed schedule was built, gated and driven here first -- 500 counts below 20 mph ramping
+  # to 409 by 30 mph, then lowered to 450. BOTH RAISED CEILINGS THREW AN EPS FAULT ON THE CAR:
+  # the MDPS refuses to deliver what it is asked for above 409 and drops out, and the fault
+  # clears once the ceiling is back at 409. Measured on this car, twice, at 500 and at 450.
   #
-  # PANDA IS FLAT AND PERMISSIVE, AT 512, and stays there. That leaves 103 counts of unenforced
-  # headroom -- carrotpilot's tradeoff, and a real cost, stated rather than argued away. It is
-  # what lets the ceiling move without reflashing, and it is why the tests below assert the
-  # relationship (command <= enforcement) rather than equality.
+  # So there is no ceiling above 409 to schedule TOWARDS. The schedule is not merely reverted,
+  # it is ruled out: raising this number does not buy authority, it buys a steering dropout in
+  # the low-speed band the raise was meant to help. Anyone reading this and reaching for a
+  # lookup table should stop here -- the experiment has been run.
+  #
+  # Flat also costs nothing to be right about. Nothing the car commands depends on a speed
+  # reading: no interpolation, no breakpoint, no half-count rounding boundary, and nothing a
+  # noisy, stale, dropped or spoofed vEgoRaw can move.
+  #
+  # PANDA IS FLAT AND PERMISSIVE, AT 512, and stays there -- carrotpilot parity, and no reflash.
+  # That leaves 103 counts of unenforced headroom, which is a real cost and is now a sharper one
+  # than when it was accepted: 410-512 is exactly the band the EPS is known to fault in. Panda
+  # will not catch a regression that commands into it, so the checks that hold THIS number at
+  # 409 are doing that job alone. See opendbc/safety/modes/hyundai.h.
   #
   # WHAT IT COSTS vs the 384 stock ceiling: every command is 6.5% stronger at every speed.
   # Driver override still BEGINS at -50 counts, and FULL yield -- -(STEER_MAX/2) - 50 -- sits at
@@ -92,21 +98,7 @@ class CarControllerParams:
   # The MDPS remains the arbiter in every case. It has its own boost curve, fault logic and
   # driver-override arbitration, and it is free to refuse any of this.
 
-  def steer_max_at(self, v_ego_raw: float) -> int:
-    """The steering ceiling in force at this speed, in LKAS11 counts.
-
-    Platforms without a schedule return STEER_MAX unchanged, so every other Hyundai is
-    bit-for-bit unaffected by this existing at all. Rounding is round(), matching Rivian and
-    the projection tool -- it is banker's, so the midpoint of the ramp is 454, not 455.
-    """
-    if self.STEER_MAX_LOOKUP is None:
-      return self.STEER_MAX
-    return int(round(float(np.interp(v_ego_raw, *self.STEER_MAX_LOOKUP))))
-
   def __init__(self, CP):
-    # None means "no schedule": steer_max_at() returns the static STEER_MAX. Only the branch
-    # below may set it, which is what keeps the schedule off every other platform.
-    self.STEER_MAX_LOOKUP: tuple[list[float], list[int]] | None = None
     self.STEER_DELTA_UP = 3
     self.STEER_DELTA_DOWN = 7
     self.STEER_DRIVER_ALLOWANCE = 50
