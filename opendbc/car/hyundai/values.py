@@ -32,35 +32,46 @@ class CarControllerParams:
   # RAISED_LIMITS lifts the ceiling to a FLAT 409 counts at every speed -- carrotpilot's
   # number, and its shape: panda enforces a permissive flat 512 while opendbc commands 409.
   #
-  # RAISING THIS ABOVE 409 PRODUCED EPS FAULTS ON THIS CAR, TWICE. A speed schedule was built
-  # and driven -- 500 counts below 20 mph ramping to 409 by 30 mph, then lowered to 450 -- and
-  # both threw an EPS fault, the MDPS dropping out rather than delivering. Coming back to 409
-  # cleared it both times.
+  # 409 IS THE MDPS'S ACTUAL ACCEPTANCE LIMIT. IT ACCEPTS 409 AND TRIPS AT 410. MEASURED.
   #
-  # BE PRECISE ABOUT WHAT THAT DOES AND DOES NOT ESTABLISH. Both attempts used the SAME
-  # speed-scheduled machinery, so the experiment never separated the two candidate causes:
-  #   (a) the VALUE -- the MDPS will not deliver more than ~409 and faults when asked, or
-  #   (b) the MECHANISM -- a ceiling that moves with vEgoRaw upset it, and a FLAT ceiling
-  #       above 409 was never actually tried.
-  # A flat build above 409 has never been driven. Two data points sharing one implementation
-  # cannot tell (a) from (b), and an earlier version of this comment asserted (a) as settled
-  # fact. It is not.
+  # Two builds went above it -- a schedule peaking at 500 (route 000000dc, opendbc eb08f1481)
+  # and one at 450 (route 000000dd, opendbc 5a8ae2e83), identified from the PINNED GITLINK of
+  # each drive, not from a label. Between them they put 158 frames above 409 on the wire and
+  # took 19 CF_Mdps_ToiFlt onsets while steering, each one accompanied by an uncommanded
+  # CF_Mdps_ToiActive dropout and, ten times, openpilot's own driver-visible
+  # steerTempUnavailable. The commanded count at every one of those 19 onsets:
   #
-  # What IS measured: flat 409 has ~1.59M engaged frames across 24 recorded routes with THREE
-  # EPS fault frames in total, and the ceiling is genuinely reached (2.2% of engaged frames sit
-  # in the top 25-count bin). Flat 409 is known-good. Anything above it is unproven and has
-  # twice coincided with faults, so it stays here until a deliberate instrumented test says
-  # otherwise -- not because the question is closed, but because it is open and untested.
+  #     410 412 413 421 426 428 428 429 429 429 429 430 431 432 432 432 432 432 433
+  #
+  # The minimum is 410. Against that, flat 409 has ~1.59M engaged frames with ZERO ToiFlt
+  # onsets while steering and zero steerTempUnavailable. The boundary sits between 409 and 410.
+  #
+  # AND IT IS THE VALUE, NOT THE MECHANISM -- the confound is broken. Both builds scheduled the
+  # ceiling over breakpoints [8.94, 13.41] m/s, but np.interp CLAMPS below its first breakpoint,
+  # so under 8.94 m/s the ceiling was a CONSTANT (500 on dc, 450 on dd). All 19 onsets happened
+  # between 2.1 and 8.6 m/s, i.e. every single one under a STATIONARY ceiling. The flat-ceiling
+  # experiment that this comment used to say had never been run was in fact run, inside the
+  # schedule's own flat region, and it faulted. A flat build above 409 would fault the same way.
+  #
+  # Why this was missed until 2026-09-01: the scanner read CF_Mdps_ToiFlt (bit 14) alone and
+  # counted it only while latActive was true. A fault that DISENGAGES the car sets its bit after
+  # latActive is already false, so the engaged-only counter scored the very events it existed to
+  # catch as zero -- which is how "3 fault frames in 1.59M" was ever reported. The bits that were
+  # never read at all are CF_Mdps_ToiUnavail (12) and CF_Mdps_FailStat (15).
+  #
+  # DO NOT RAISE THIS. The experiment has been run, at 500, at 450, and flat. See
+  # .elantra/eps_census.py for the scanner and .elantra/ROAD-TEST-cn7-lateral.md for the tables.
   #
   # Flat also costs nothing to be right about. Nothing the car commands depends on a speed
   # reading: no interpolation, no breakpoint, no half-count rounding boundary, and nothing a
   # noisy, stale, dropped or spoofed vEgoRaw can move.
   #
   # PANDA IS FLAT AND PERMISSIVE, AT 512, and stays there -- carrotpilot parity, and no reflash.
-  # That leaves 103 counts of unenforced headroom, which is a real cost and is now a sharper one
-  # than when it was accepted: 410-512 is exactly the band the EPS is known to fault in. Panda
-  # will not catch a regression that commands into it, so the checks that hold THIS number at
-  # 409 are doing that job alone. See opendbc/safety/modes/hyundai.h.
+  # That leaves 103 counts of unenforced headroom, and that cost is now measured rather than
+  # argued: 410-512 is exactly the band the EPS faults in, and panda passes all of it. A
+  # regression that commands 410 sails through panda and stops the car steering. So the checks
+  # that hold THIS number at 409 are the only thing doing that job -- assert the LITERAL 409,
+  # never "opendbc <= panda", which 450 also satisfies. See opendbc/safety/modes/hyundai.h.
   #
   # WHAT IT COSTS vs the 384 stock ceiling: every command is 6.5% stronger at every speed.
   # Driver override still BEGINS at -50 counts, and FULL yield -- -(STEER_MAX/2) - 50 -- sits at

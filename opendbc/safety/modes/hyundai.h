@@ -228,12 +228,16 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
   // panda is HYUNDAI_LIMITS(512, 10, 10) against a 409 default, and matching the ceiling is
   // what lets opendbc's number move without a reflash. Our rates stay 3/7, not carrot's 10/10.
   //
-  // THE 103 COUNTS BETWEEN 409 AND 512 ARE UNENFORCED, and that gap is worse than it looks.
-  // 500 and 450 were both driven on this car and BOTH COINCIDED WITH EPS FAULTS, the MDPS
-  // dropping out rather than delivering; 409 cleared it both times. Whether the cause was the
-  // value or the speed-scheduled machinery both attempts shared is NOT established -- see the
-  // CarControllerParams comment in values.py. Either way, 410-512 is a band this car has never
-  // steered in successfully, and panda does not police it.
+  // THE 103 COUNTS BETWEEN 409 AND 512 ARE UNENFORCED, and the cost of that is now measured
+  // rather than feared. This MDPS accepts 409 and trips CF_Mdps_ToiFlt at 410: routes 000000dc
+  // (500 schedule) and 000000dd (450 schedule) put 158 frames above 409 on the wire and took 19
+  // fault onsets while steering, at commanded counts 410 through 433, against ~1.59M engaged
+  // frames at 409 or below with none at all. It is the VALUE and not the schedule -- np.interp
+  // clamps below its first breakpoint, so every onset fired under a STATIONARY ceiling. See the
+  // CarControllerParams comment in values.py.
+  //
+  // So 410-512 is not merely unproven, it is the band the EPS actively refuses, and panda passes
+  // all of it.
   //
   // So nothing here will stop a regression that commands 450. What holds the line is
   // CarControllerParams.STEER_MAX in opendbc/car/hyundai/values.py and the tests around it,
