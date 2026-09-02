@@ -317,17 +317,31 @@ class TestHyundaiSafetyFCEV(TestHyundaiSafety):
 
 
 class TestHyundaiLegacySafety(TestHyundaiSafety):
+  # TestHyundaiSafety is decorated with @parameterized_class, and opendbc/testing.py sets
+  # cls.__test__ = False on the class it decorates. A plain subclass inherits that, and pytest
+  # then never collects it -- no skip, no warning, it simply does not run. __test__ is a pytest
+  # convention and unittest ignores it, so test.sh has always run these; pytest had not.
+  __test__ = True
+
   def setUp(self):
     self.packer = CANPackerSafety("hyundai_can_generated")
     self.safety = libsafety_py.libsafety
+    self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
     self.safety.set_safety_hooks(CarParams.SafetyModel.hyundaiLegacy, 0)
     self.safety.init_tests()
 
 
 class TestHyundaiLegacySafetyEV(TestHyundaiSafety):
+  # TestHyundaiSafety is decorated with @parameterized_class, and opendbc/testing.py sets
+  # cls.__test__ = False on the class it decorates. A plain subclass inherits that, and pytest
+  # then never collects it -- no skip, no warning, it simply does not run. __test__ is a pytest
+  # convention and unittest ignores it, so test.sh has always run these; pytest had not.
+  __test__ = True
+
   def setUp(self):
     self.packer = CANPackerSafety("hyundai_can_generated")
     self.safety = libsafety_py.libsafety
+    self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
     self.safety.set_safety_hooks(CarParams.SafetyModel.hyundaiLegacy, HyundaiSafetyFlags.EV_GAS)
     self.safety.init_tests()
 
@@ -337,9 +351,16 @@ class TestHyundaiLegacySafetyEV(TestHyundaiSafety):
 
 
 class TestHyundaiLegacySafetyHEV(TestHyundaiSafety):
+  # TestHyundaiSafety is decorated with @parameterized_class, and opendbc/testing.py sets
+  # cls.__test__ = False on the class it decorates. A plain subclass inherits that, and pytest
+  # then never collects it -- no skip, no warning, it simply does not run. __test__ is a pytest
+  # convention and unittest ignores it, so test.sh has always run these; pytest had not.
+  __test__ = True
+
   def setUp(self):
     self.packer = CANPackerSafety("hyundai_can_generated")
     self.safety = libsafety_py.libsafety
+    self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
     self.safety.set_safety_hooks(CarParams.SafetyModel.hyundaiLegacy, HyundaiSafetyFlags.HYBRID_GAS)
     self.safety.init_tests()
 
@@ -408,6 +429,12 @@ class TestHyundaiLongitudinalSafety(HyundaiLongitudinalBase, TestHyundaiSafety):
 
 
 class TestHyundaiLongitudinalSafetyCameraSCC(HyundaiLongitudinalBase, TestHyundaiSafety):
+  # TestHyundaiSafety is decorated with @parameterized_class, and opendbc/testing.py sets
+  # cls.__test__ = False on the class it decorates. A plain subclass inherits that, and pytest
+  # then never collects it -- no skip, no warning, it simply does not run. __test__ is a pytest
+  # convention and unittest ignores it, so test.sh has always run these; pytest had not.
+  __test__ = True
+
   TX_MSGS = [[0x340, 0], [0x4F1, 2], [0x485, 0], [0x420, 0], [0x421, 0], [0x50A, 0], [0x389, 0], [0x4A2, 0]]
 
   FWD_BLACKLISTED_ADDRS = {2: [0x340, 0x485, 0x420, 0x421, 0x50A, 0x389]}
