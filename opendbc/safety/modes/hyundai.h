@@ -25,10 +25,17 @@ const LongitudinalLimits HYUNDAI_LONG_LIMITS = {
   .min_accel = -350,  // 1/100 m/s2
 };
 
+// LFAHDA_MFC (0x485) is 4 bytes on every Hyundai CAN platform except the CN7 Elantra, which
+// sends it at DLC 8. tx_msg_safety_check() matches on exact length, so the allow-list has to
+// carry both entries, and hyundai_tx_hook() is what ties the length to the platform. Only the
+// first sets check_relay: safety.h keys relay detection (safety_rx_hook) and static forward
+// blocking (safety_fwd_hook) on (addr, bus) and never on len, so one entry already covers
+// 0x485 for both -- a second would only re-run stock_ecu_check() on every message received.
 #define HYUNDAI_COMMON_TX_MSGS(scc_bus) \
   {0x340, 0,       8, .check_relay = true},   /* LKAS11 Bus 0                              */ \
   {0x4F1, scc_bus, 4, .check_relay = false},  /* CLU11 Bus 0 (radar-SCC) or 2 (camera-SCC) */ \
-  {0x485, 0,       4, .check_relay = true},   /* LFAHDA_MFC Bus 0                          */ \
+  {0x485, 0,       4, .check_relay = true},   /* LFAHDA_MFC Bus 0, 4 bytes on most HKG     */ \
+  {0x485, 0,       8, .check_relay = false},  /* LFAHDA_MFC Bus 0, 8 bytes on the CN7      */ \
 
 #define HYUNDAI_LONG_COMMON_TX_MSGS(scc_bus) \
   HYUNDAI_COMMON_TX_MSGS(scc_bus) \
@@ -274,6 +281,16 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
                                         hyundai_alt_limits ? HYUNDAI_STEERING_LIMITS_ALT : HYUNDAI_STEERING_LIMITS;
 
     if (steer_torque_cmd_checks(desired_torque, steer_req, limits)) {
+      tx = false;
+    }
+  }
+
+  // LFAHDA_MFC: 8 bytes on the CN7 Elantra bus, 4 on every other Hyundai CAN platform.
+  // The allow-list matches on exact length and has to carry both so either can reach here;
+  // this is what ties the length to the platform instead of letting both through for all.
+  if (msg->addr == 0x485U) {
+    const unsigned int lfahda_len = hyundai_lfahda_mfc_8 ? 8U : 4U;
+    if (GET_LEN(msg) != lfahda_len) {
       tx = false;
     }
   }

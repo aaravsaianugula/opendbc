@@ -108,6 +108,12 @@ class CarInterface(CarInterfaceBase):
       if ret.flags & HyundaiFlags.CAMERA_SCC:
         ret.safetyConfigs[0].safetyParam |= HyundaiSafetyFlags.CAMERA_SCC.value
 
+      # The dbc decides what openpilot packs into 0x485, this decides what panda lets out,
+      # and panda cannot see carFingerprint -- only this param. This line is the only bridge
+      # between them.
+      if ret.flags & HyundaiFlags.LFAHDA_MFC_8:
+        ret.safetyConfigs[0].safetyParam |= HyundaiSafetyFlags.LFAHDA_MFC_8.value
+
       # These cars have the LFA button on the steering wheel
       if 0x391 in fingerprint[0]:
         ret.flags |= HyundaiFlags.HAS_LDA_BUTTON.value
