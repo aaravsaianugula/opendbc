@@ -3,7 +3,7 @@ from opendbc.testing import parameterized_class
 import random
 import unittest
 
-from opendbc.car.hyundai.values import HyundaiSafetyFlags
+from opendbc.car.hyundai.values import CarControllerParams, HyundaiFlags, HyundaiSafetyFlags
 from opendbc.car.structs import CarParams
 from opendbc.safety.tests.libsafety import libsafety_py
 import opendbc.safety.tests.common as common
@@ -72,7 +72,8 @@ def checksum(msg):
 @parameterized_class(LDA_BUTTON)
 class TestHyundaiSafety(HyundaiButtonBase, common.CarSafetyTest, common.DriverTorqueSteeringSafetyTest, common.SteerRequestCutSafetyTest):
   TX_MSGS = [[0x340, 0], [0x4F1, 0], [0x485, 0]]
-  STANDSTILL_THRESHOLD = 12  # 0.375 kph
+  STANDSTILL_THRESHOLD = 0.375 / 3.6  # 0.375 kph, in m/s
+  STANDSTILL_STEP = 0.03125 / 3.6     # exactly one WHL_SPD count, so the probe stays a boundary
   RELAY_MALFUNCTION_ADDRS = {0: (0x340, 0x485)}  # LKAS11
   FWD_BLACKLISTED_ADDRS = {2: [0x340, 0x485]}
 
@@ -125,8 +126,9 @@ class TestHyundaiSafety(HyundaiButtonBase, common.CarSafetyTest, common.DriverTo
     return self.packer.make_can_msg_safety("TCS13", 0, values, fix_checksum=checksum)
 
   def _speed_msg(self, speed):
-    # safety doesn't scale, so undo the scaling
-    values = {"WHL_SPD_%s" % s: speed * 0.03125 for s in ["FL", "FR", "RL", "RR"]}
+    # speed is m/s; WHL_SPD11 carries km/h. The conversion has to be real: the standstill
+    # boundary probes step by exactly one WHL_SPD count (see STANDSTILL_STEP).
+    values = {"WHL_SPD_%s" % s: speed * 3.6 for s in ["FL", "FR", "RL", "RR"]}
     values["WHL_SPD_AliveCounter_LSB"] = (self.cnt_speed % 16) & 0x3
     values["WHL_SPD_AliveCounter_MSB"] = (self.cnt_speed % 16) >> 2
     self.__class__.cnt_speed += 1
@@ -267,6 +269,182 @@ class TestHyundaiSafetyAltLimits2(TestHyundaiSafety):
 
 
 @parameterized_class(LDA_BUTTON)
+class TestHyundaiSafetyRaisedLimits(TestHyundaiSafety):
+  """The CN7 Elantra's raised steering torque ceiling. FLAT on both sides, at DIFFERENT numbers.
+
+  panda enforces 512, opendbc commands 409, and neither reads speed -- so none of the dynamic
+  path's -1 m/s fudge or +1 count of slack applies to either. 512 is carrotpilot parity and is
+  what lets opendbc's number move without a reflash.
+
+  THE 103 COUNTS BETWEEN THEM ARE UNENFORCED, and this file no longer treats that as merely
+  untidy. 500 and 450 were both driven on this car and both threw an EPS fault; the MDPS
+  refuses above 409 and drops steering. So the unpoliced band is exactly the band the car
+  fails in, and panda cannot be the thing that catches a regression into it -- the literal
+  assertions on opendbc's 409 below are.
+
+  Three lines of class attributes is still the entire configuration, so
+  common.DriverTorqueSteeringSafetyTest sweeps the ceiling, both rate limits and the
+  driver-override envelope exactly as it does for ALT_LIMITS and ALT_LIMITS_2. What is added
+  below is only what those generic tests cannot see: that the two sides hold their separate
+  numbers, that what opendbc commands is accepted, and that no speed reading moves either.
+  """
+
+  MAX_RATE_UP = 3
+  MAX_RATE_DOWN = 7
+  MAX_TORQUE_LOOKUP = [0], [512]
+
+  # What opendbc commands, restated. Read from CarControllerParams in the tests below as well
+  # -- the literal is here so a test that only compared the two sides against each other
+  # cannot stay green while both move together.
+  OPENDBC_CEILING = 409
+  UNENFORCED_HEADROOM = 103
+
+  @classmethod
+  def setUpClass(cls):
+    if cls.__name__ == "TestHyundaiSafetyRaisedLimits":
+      cls.safety = None
+      raise unittest.SkipTest
+
+  def setUp(self):
+    self.packer = CANPackerSafety("hyundai_can_generated")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, HyundaiSafetyFlags.RAISED_LIMITS)
+    self.safety.init_tests()
+
+  @staticmethod
+  def _car_params(raised: bool):
+    CP = CarParams.new_message()
+    CP.carFingerprint = "HYUNDAI_ELANTRA_2024"
+    flags = HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.CAMERA_SCC
+    if raised:
+      flags |= HyundaiFlags.RAISED_LIMITS
+    CP.flags = int(flags)
+    return CP
+
+  def _assert_ceiling(self, allowed: int, rejected: int, note: str = ""):
+    """The frame at `allowed` must go out and the one at `rejected` must not.
+
+    Both halves matter. controls_allowed is 0 after init_tests(), and with it clear panda
+    rejects everything -- which would make every "is rejected" assertion here pass regardless
+    of the ceiling. Setting the previous torque to the value under test zeroes the rate delta,
+    so max_rate_up cannot be what rejects the frame either; the only thing left is the limit.
+    """
+    self.safety.set_controls_allowed(1)
+    self._set_prev_torque(allowed)
+    self.assertTrue(self._tx(self._torque_cmd_msg(allowed)),
+                    f"{allowed} should have been accepted {note}")
+    self._set_prev_torque(rejected)
+    self.assertFalse(self._tx(self._torque_cmd_msg(rejected)),
+                     f"{rejected} should have been rejected {note}")
+
+  def test_the_two_sides_hold_their_separate_numbers(self):
+    # THE check for this design, and the one that has to be literal. panda's 512 is 103 counts
+    # above what opendbc commands, and that whole band is where the EPS faults -- so
+    # "opendbc <= panda" is NOT a sufficient assertion here: a 450 would satisfy it and would
+    # stop the car steering. Both numbers are pinned, and the gap between them is pinned too,
+    # so nobody can move one and quietly widen the unpoliced band.
+    self.assertEqual(self.MAX_TORQUE, 512)
+    params = CarControllerParams(self._car_params(True))
+
+    self.assertEqual(params.STEER_MAX, self.OPENDBC_CEILING)
+    self.assertEqual(self.MAX_TORQUE - params.STEER_MAX, self.UNENFORCED_HEADROOM)
+
+    self._assert_ceiling(512, 513)
+
+  def test_panda_accepts_what_opendbc_commands(self):
+    # The relationship above, executed on the wire instead of compared as numbers: put
+    # opendbc's exact ceiling into a frame and confirm panda passes it. Speeds are swept
+    # because the claim is that neither side varies with speed, and this is the half of that
+    # claim that involves an actual transmission.
+    params = CarControllerParams(self._car_params(True))
+    for speed in (0., 3., 5., 8.94, 11.175, 13.41, 16., 25., 40.):
+      with self.subTest(speed=speed):
+        # controls_allowed is 0 after init_tests() and panda then rejects EVERYTHING, so
+        # without this the test fails at every speed for a reason that has nothing to do
+        # with the ceiling. _assert_ceiling's docstring warns about the same trap from the
+        # other side, where it would make a rejection assertion pass vacuously.
+        self.safety.set_controls_allowed(1)
+        self._reset_speed_measurement(speed)
+        self._set_prev_torque(params.STEER_MAX)
+        self.assertTrue(self._tx(self._torque_cmd_msg(params.STEER_MAX)),
+                        f"panda rejected {params.STEER_MAX}, which opendbc commands at {speed} m/s")
+
+  def test_the_flag_is_what_raises_it(self):
+    # Without RAISED_LIMITS the same platform must fall back to the stock 384. If the raise
+    # leaked out of the flag check, every other Hyundai on this branch would be commanding
+    # above what panda enforces for it.
+    self.assertEqual(CarControllerParams(self._car_params(False)).STEER_MAX, 384)
+
+  def test_speed_does_not_change_the_ceiling(self):
+    # Neither side reads speed, and this asserts panda's half of that. 513 must be rejected at
+    # every speed too: the +1 count of slack and the -1 m/s fudge in lateral.h both live inside
+    # `if (limits.dynamic_max_torque)`, which this path does not take. The speeds include the
+    # retired schedule's breakpoints and the values either side
+    # of them, where a leaked speed dependence would show up first.
+    for speed in (0., 5., 7.9, 8.94, 12., 13.41, 16., 16.1, 25., 40.):
+      self._reset_speed_measurement(speed)
+      self._assert_ceiling(512, 513, f"at {speed} m/s")
+
+  def test_cold_start_ceiling(self):
+    # No speed frame has ever been received. Under the old schedule this was the permissive
+    # end of a descending lookup and needed its own argument; here there is nothing for it to
+    # be the end of, and the mode no longer samples vehicle_speed at all.
+    self.safety.init_tests()
+    self._assert_ceiling(512, 513, "before any speed frame")
+
+  def test_bad_speed_cannot_move_the_ceiling(self):
+    # Stale, absurd and reversed-looking speed readings. None of them can move a limit that
+    # never reads the speed -- and since this mode stopped calling UPDATE_VEHICLE_SPEED, the
+    # speed is not even recorded. 0x386 is still received here (it feeds vehicle_moving), so
+    # this exercises the real RX path. It is the test that would have to grow a case per
+    # failure mode if the ceiling were scheduled.
+    self._reset_speed_measurement(30.)
+    self._assert_ceiling(512, 513, "after highway speed, then no further frames (stale)")
+    for speed in (0., 200., 1000.):
+      self._reset_speed_measurement(speed)
+      self._assert_ceiling(512, 513, f"at an implausible {speed} m/s")
+
+  def test_lfahda_mfc_length_is_gated(self):
+    """0x485 is 8 bytes on the CN7 bus and 4 everywhere else, and only the flag may widen it.
+
+    The TX allow-list entry had to be widened to 8 so this car can send it at all, which on
+    its own relaxes the check for every Hyundai CAN platform. The tx_hook length test is what
+    keeps 4 enforced for the others, so it needs both directions or it proves nothing: a rule
+    that only ever rejects would also "pass" if it rejected the CN7 too.
+    """
+    for param, expected_len in ((0, 4),
+                                (HyundaiSafetyFlags.LFAHDA_MFC_8, 8)):
+      try:
+        self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, param)
+        self.safety.init_tests()
+        self.safety.set_controls_allowed(1)
+        for length in (4, 8):
+          allowed = self._tx(common.make_msg(0, 0x485, length))
+          self.assertEqual(length == expected_len, allowed,
+                           f"{length}-byte 0x485 with param={param}: expected " +
+                           f"{'accept' if length == expected_len else 'reject'}")
+      finally:
+        self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, HyundaiSafetyFlags.RAISED_LIMITS)
+        self.safety.init_tests()
+
+  def test_static_limits_have_no_slack(self):
+    # Keeps the neighbors honest: upstream's +1 count is on the DYNAMIC path only, and nothing
+    # on this branch takes that path -- no ceiling here varies with speed at all. A stock
+    # Hyundai must accept exactly 384 and reject 385, at any speed.
+    try:
+      self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, 0)
+      self.safety.init_tests()
+      self._reset_speed_measurement(25.)
+      self._assert_ceiling(384, 385)
+    finally:
+      # this test is the only one that leaves the mode it was given; restore it so the
+      # class stays usable under any runner that does not re-hook between tests
+      self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, HyundaiSafetyFlags.RAISED_LIMITS)
+      self.safety.init_tests()
+
+
+@parameterized_class(LDA_BUTTON)
 class TestHyundaiSafetyCameraSCC(TestHyundaiSafety):
   BUTTONS_TX_BUS = 2  # tx on 2, rx on 0
   SCC_BUS = 2  # rx on 2
@@ -317,17 +495,31 @@ class TestHyundaiSafetyFCEV(TestHyundaiSafety):
 
 
 class TestHyundaiLegacySafety(TestHyundaiSafety):
+  # TestHyundaiSafety is decorated with @parameterized_class, and opendbc/testing.py sets
+  # cls.__test__ = False on the class it decorates. A plain subclass inherits that, and pytest
+  # then never collects it -- no skip, no warning, it simply does not run. __test__ is a pytest
+  # convention and unittest ignores it, so test.sh has always run these; pytest had not.
+  __test__ = True
+
   def setUp(self):
     self.packer = CANPackerSafety("hyundai_can_generated")
     self.safety = libsafety_py.libsafety
+    self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
     self.safety.set_safety_hooks(CarParams.SafetyModel.hyundaiLegacy, 0)
     self.safety.init_tests()
 
 
 class TestHyundaiLegacySafetyEV(TestHyundaiSafety):
+  # TestHyundaiSafety is decorated with @parameterized_class, and opendbc/testing.py sets
+  # cls.__test__ = False on the class it decorates. A plain subclass inherits that, and pytest
+  # then never collects it -- no skip, no warning, it simply does not run. __test__ is a pytest
+  # convention and unittest ignores it, so test.sh has always run these; pytest had not.
+  __test__ = True
+
   def setUp(self):
     self.packer = CANPackerSafety("hyundai_can_generated")
     self.safety = libsafety_py.libsafety
+    self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
     self.safety.set_safety_hooks(CarParams.SafetyModel.hyundaiLegacy, HyundaiSafetyFlags.EV_GAS)
     self.safety.init_tests()
 
@@ -337,9 +529,16 @@ class TestHyundaiLegacySafetyEV(TestHyundaiSafety):
 
 
 class TestHyundaiLegacySafetyHEV(TestHyundaiSafety):
+  # TestHyundaiSafety is decorated with @parameterized_class, and opendbc/testing.py sets
+  # cls.__test__ = False on the class it decorates. A plain subclass inherits that, and pytest
+  # then never collects it -- no skip, no warning, it simply does not run. __test__ is a pytest
+  # convention and unittest ignores it, so test.sh has always run these; pytest had not.
+  __test__ = True
+
   def setUp(self):
     self.packer = CANPackerSafety("hyundai_can_generated")
     self.safety = libsafety_py.libsafety
+    self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
     self.safety.set_safety_hooks(CarParams.SafetyModel.hyundaiLegacy, HyundaiSafetyFlags.HYBRID_GAS)
     self.safety.init_tests()
 
@@ -408,6 +607,12 @@ class TestHyundaiLongitudinalSafety(HyundaiLongitudinalBase, TestHyundaiSafety):
 
 
 class TestHyundaiLongitudinalSafetyCameraSCC(HyundaiLongitudinalBase, TestHyundaiSafety):
+  # TestHyundaiSafety is decorated with @parameterized_class, and opendbc/testing.py sets
+  # cls.__test__ = False on the class it decorates. A plain subclass inherits that, and pytest
+  # then never collects it -- no skip, no warning, it simply does not run. __test__ is a pytest
+  # convention and unittest ignores it, so test.sh has always run these; pytest had not.
+  __test__ = True
+
   TX_MSGS = [[0x340, 0], [0x4F1, 2], [0x485, 0], [0x420, 0], [0x421, 0], [0x50A, 0], [0x389, 0], [0x4A2, 0]]
 
   FWD_BLACKLISTED_ADDRS = {2: [0x340, 0x485, 0x420, 0x421, 0x50A, 0x389]}

@@ -1,0 +1,18 @@
+CM_ "IMPORT _hyundai_can_common.dbc";
+
+// LFAHDA_MFC (0x485) is 8 bytes on the CN7 Elantra. MEASURED, not assumed: on route
+// 000000c8 the FACTORY camera (src=2) transmits 0x485 with DLC 8 in 2,419 of 2,419
+// frames. No signal moved -- the highest bit any of them touches is bit 30, inside
+// byte 3 -- so bytes 4-7 are padding and this differs from the shared file only in
+// the DLC openpilot must match to be accepted on this bus.
+BO_ 1157 LFAHDA_MFC: 8 XXX
+ SG_ HDA_USM : 0|2@1+ (1,0) [0|3] "" XXX
+ SG_ HDA_Active : 2|1@1+ (1,0) [0|1] "" XXX
+ SG_ HDA_Icon_State : 3|2@1+ (1,0) [0|3] "" XXX
+ SG_ HDA_Chime : 7|1@1+ (1,0) [0|1] "" XXX
+ SG_ HDA_VSetReq : 8|8@1+ (1,0) [0|255] "km/h" XXX
+ SG_ LFA_SysWarning : 16|3@1+ (1,0) [0|7] "" XXX
+ SG_ NEW_SIGNAL_1 : 20|3@1+ (1,0) [0|7] "" XXX
+ SG_ LFA_Icon_State : 24|2@1+ (1,0) [0|3] "" XXX
+ SG_ LFA_USM : 27|2@1+ (1,0) [0|3] "" XXX
+ SG_ HDA_SysWarning : 29|2@1+ (1,0) [0|3] "" XXX

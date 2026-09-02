@@ -17,6 +17,55 @@ class CarControllerParams:
   ACCEL_MIN = -3.5 # m/s^2
   ACCEL_MAX = 2.0 # m/s^2
 
+  # The 2024-25 Elantra (CN7) runs out of steering torque in tight low-speed turns: across 62
+  # one-minute segments (225,275 frames with lateral control active), 4.56% of commands in the
+  # 3-7 m/s band sat pinned at the 384-count HKG default, against 0.02% above 18 m/s.
+  #
+  # RAISED_LIMITS lifts the ceiling to a FLAT 409 counts at every speed -- carrotpilot's number
+  # and its shape: opendbc commands 409, panda enforces a permissive flat 512.
+  #
+  # 409 IS THE MDPS'S MEASURED ACCEPTANCE LIMIT: it accepts 409 and trips CF_Mdps_ToiFlt at 410.
+  # Builds that commanded above it took 19 fault onsets while steering, at commanded counts
+  #
+  #     410 412 413 421 426 428 428 429 429 429 429 430 431 432 432 432 432 432 433
+  #
+  # against ~1.59M engaged frames at 409 or below with none at all. Every one of those onsets
+  # happened between 2.1 and 8.6 m/s, under a ceiling that was constant at those speeds -- so
+  # the boundary is the VALUE, not any mechanism, and a flat build above 409 would fault the
+  # same way. DO NOT RAISE IT, and do not test a raise on the road: the experiment has already
+  # run. The scan and its tables live in the sunnypilot superproject that pins this commit.
+  #
+  # THE RAISE IS NESTED INSIDE THE else: BRANCH ON PURPOSE. Assigned after the if/elif chain it
+  # would outrank CANFD, the 255 list, ALT_LIMITS and ALT_LIMITS_2, and a car carrying
+  # RAISED_LIMITS plus any of those would command 409 while panda enforced 170.
+  #
+  # PANDA IS FLAT AND PERMISSIVE AT 512 (safety/modes/hyundai.h) -- carrotpilot parity, and it
+  # lets this number move without a reflash. The cost is that 410-512 is unenforced, and that
+  # is exactly the band the EPS refuses: panda will pass a 450 that stops the car steering. So
+  # every check on this number asserts the LITERAL 409. "At or under panda" is vacuous here,
+  # because 450 satisfies it too.
+  #
+  # Nothing on this path reads speed, so no interpolation, no rounding boundary and no stale,
+  # noisy or spoofed vEgoRaw can move what is commanded.
+  #
+  # WHAT IT COSTS vs the 384 stock ceiling: every command is 6.5% stronger at every speed, and
+  # full driver yield -- -(STEER_MAX/2) - 50 -- moves from -242 counts to -254.5. Driver
+  # override still begins at -50.
+  #
+  # WHERE 409 CAME FROM: it is carrotpilot's default for all HKG, in this same else: branch,
+  # with the rates, allowance, multiplier and threshold left at upstream's values (re-checked
+  # against ajouatom/openpilot@carrot-wip on 2026-08-31). But carrot has no 2024-25 CN7
+  # platform -- its CN7 is HYUNDAI_ELANTRA_2021 ("Elantra 2021-23"), pre-facelift -- so on this
+  # car 409 was an extrapolation across a facelift onto a boundary since measured directly.
+  #
+  # Hyundai's own LKAS reaches 157 counts here (route 000000b9, 40,144 stock-LKAS frames, all
+  # peaks at 1.1-2.0 degrees of wheel angle). That bounds what Hyundai's lane-centring FEATURE
+  # asks for, not what the MDPS can deliver -- openpilot steers through turns and intersections
+  # at up to ~146 degrees. It is a reference point, not a ceiling to copy.
+  #
+  # The MDPS remains the arbiter: it has its own boost curve, fault logic and driver-override
+  # arbitration, and it is free to refuse any of this.
+
   def __init__(self, CP):
     self.STEER_DELTA_UP = 3
     self.STEER_DELTA_DOWN = 7
@@ -56,6 +105,13 @@ class CarControllerParams:
     else:
       self.STEER_MAX = 384
 
+      # Only platforms whose stock ceiling is this 384 may raise it, and living inside this
+      # branch is what guarantees that. Assigned after the chain instead, RAISED_LIMITS would
+      # silently outrank CANFD, the 255 list, ALT_LIMITS and ALT_LIMITS_2 -- a car carrying
+      # both flags would command 409 while panda enforced 170.
+      if CP.flags & HyundaiFlags.RAISED_LIMITS:
+        self.STEER_MAX = 409
+
 
 class HyundaiSafetyFlags(IntFlag):
   EV_GAS = 1
@@ -68,6 +124,8 @@ class HyundaiSafetyFlags(IntFlag):
   CANFD_LKA_STEER_MSG_ALT = 128
   FCEV_GAS = 256
   ALT_LIMITS_2 = 512
+  RAISED_LIMITS = 1024
+  LFAHDA_MFC_8 = 2048
 
 
 # Hyundai/Kia/Genesis SCC (Smart Cruise Control) and steering architecture:
@@ -148,6 +206,15 @@ class HyundaiFlags(IntFlag):
   FCEV = 2 ** 25
 
   ALT_LIMITS_2 = 2 ** 26
+
+  # flat raised steering torque ceiling; see CarControllerParams at the top of this file
+  RAISED_LIMITS = 2 ** 27
+
+  # LFAHDA_MFC (0x485) is 8 bytes on this bus rather than the 4 every other Hyundai CAN
+  # platform uses. The dbc says what openpilot packs; this flag tells panda how many bytes
+  # to allow out. They must agree or the car either cannot show HDA state or panda's
+  # allow-list is wider than the message it guards.
+  LFAHDA_MFC_8 = 2 ** 28
 
 
 @dataclass
@@ -230,11 +297,28 @@ class CAR(Platforms):
     CarSpecs(mass=2800 * CV.LB_TO_KG, wheelbase=2.72, steerRatio=12.9, tireStiffnessFactor=0.65),
     flags=HyundaiFlags.CHECKSUM_CRC8,
   )
+  HYUNDAI_ELANTRA_2024 = HyundaiPlatformConfig(
+    [HyundaiCarDocs("Hyundai Elantra 2024-25", car_parts=CarParts.common([CarHarness.hyundai_k]))],
+    CarSpecs(mass=2797 * CV.LB_TO_KG, wheelbase=2.72, steerRatio=12.9, tireStiffnessFactor=0.65),
+    flags=HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.CAMERA_SCC | HyundaiFlags.RAISED_LIMITS |
+          HyundaiFlags.LFAHDA_MFC_8,
+    dbc_dict={Bus.pt: "hyundai_can_cn7_generated"},
+  )
   HYUNDAI_ELANTRA_HEV_2021 = HyundaiPlatformConfig(
     [HyundaiCarDocs("Hyundai Elantra Hybrid 2021-23", video="https://youtu.be/_EdYQtV52-c",
                     car_parts=CarParts.common([CarHarness.hyundai_k]))],
     CarSpecs(mass=3017 * CV.LB_TO_KG, wheelbase=2.72, steerRatio=12.9, tireStiffnessFactor=0.65),
     flags=HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.HYBRID,
+  )
+  HYUNDAI_ELANTRA_HEV_2024 = HyundaiPlatformConfig(
+    [
+      HyundaiCarDocs("Hyundai Elantra Hybrid 2024-25", car_parts=CarParts.common([CarHarness.hyundai_k])),
+      HyundaiCarDocs("Hyundai i30 Hybrid 2024", car_parts=CarParts.common([CarHarness.hyundai_k])),
+    ],
+    CarSpecs(mass=3017 * CV.LB_TO_KG, wheelbase=2.72, steerRatio=12.9, tireStiffnessFactor=0.65),
+    flags=HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.CAMERA_SCC | HyundaiFlags.HYBRID |
+          HyundaiFlags.LFAHDA_MFC_8,
+    dbc_dict={Bus.pt: "hyundai_can_cn7_generated"},
   )
   HYUNDAI_GENESIS = HyundaiPlatformConfig(
     [

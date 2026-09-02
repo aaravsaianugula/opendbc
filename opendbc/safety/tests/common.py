@@ -1053,6 +1053,17 @@ class SafetyTest(SafetyTestBase):
             if attr.startswith('TestHyundaiLongitudinal'):
               # exceptions for common msgs across different Hyundai CAN platforms
               tx = list(filter(lambda m: m[0] not in [0x420, 0x50A, 0x389, 0x4A2], tx))
+
+            # LFAHDA_MFC (0x485) is a HUD/status message with no actuation and no TX content
+            # check, and every Hyundai CAN mode ships the identical TX list -- so it is not a
+            # message one mode allows and another does not. Length is now the discriminator:
+            # the allow-list permits 8 because the CN7 Elantra bus carries it that way, and
+            # hyundai_tx_hook rejects anything other than 4 unless HYUNDAI_PARAM_LFAHDA_MFC_8
+            # is set. make_msg() here builds 8 bytes, so this probe would be asserting that
+            # length rule rather than cross-mode isolation. It is covered directly, in both
+            # directions, by test_lfahda_mfc_length_is_gated.
+            if attr.startswith('TestHyundai') and current_test.startswith('TestHyundai'):
+              tx = list(filter(lambda m: m[0] not in [0x485, ], tx))
             all_tx.append([[m[0], m[1], attr] for m in tx])
 
     # make sure we got all the msgs
@@ -1071,6 +1082,11 @@ class SafetyTest(SafetyTestBase):
 @add_regen_tests
 class CarSafetyTest(SafetyTest, MadsSafetyTestBase):
   STANDSTILL_THRESHOLD: float = 0.0
+  # How far past STANDSTILL_THRESHOLD the "past threshold" probes below step. The default of 1
+  # is one unit of whatever _speed_msg() takes. A mode whose _speed_msg takes m/s while the
+  # safety threshold is a raw CAN count must narrow this, or the probe lands hundreds of counts
+  # past the limit and stops testing the boundary at all.
+  STANDSTILL_STEP: float = 1
   GAS_PRESSED_THRESHOLD = 0
   RELAY_MALFUNCTION_ADDRS: dict[int, tuple[int, ...]] | None = None
 
@@ -1214,7 +1230,7 @@ class CarSafetyTest(SafetyTest, MadsSafetyTestBase):
     self._rx(_user_brake_msg(1))
     self.assertTrue(self.safety.get_controls_allowed())
     self.assertTrue(self.safety.get_longitudinal_allowed())
-    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + 1))
+    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + self.STANDSTILL_STEP))
     self._rx(_user_brake_msg(1))
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.get_longitudinal_allowed())
@@ -1232,7 +1248,7 @@ class CarSafetyTest(SafetyTest, MadsSafetyTestBase):
     self.assertFalse(self.safety.get_vehicle_moving())
 
     # past threshold
-    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + 1))
+    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + self.STANDSTILL_STEP))
     self.assertTrue(self.safety.get_vehicle_moving())
 
   def test_rx_hook_speed_mismatch(self):
