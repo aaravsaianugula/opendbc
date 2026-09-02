@@ -231,6 +231,21 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS = HYUNDAI_LIMITS(384, 3, 7);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT = HYUNDAI_LIMITS(270, 2, 3);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT_2 = HYUNDAI_LIMITS(170, 2, 3);
+  // Flat 512 while opendbc commands a flat 409 (CarControllerParams, car/hyundai/values.py).
+  // panda sits deliberately above the command so that number can move without a reflash --
+  // carrotpilot parity, though its rates are 10/10 and these stay at upstream's 3/7.
+  //
+  // THE 103 COUNTS IN BETWEEN ARE UNENFORCED, and that is precisely the band this MDPS
+  // refuses: it accepts 409 and trips CF_Mdps_ToiFlt at 410, measured across 19 fault onsets
+  // at commanded counts 410-433 against ~1.59M engaged frames at 409 or below with none. So
+  // nothing here will stop a regression that commands 450; what holds the line is values.py
+  // and the tests around it, which assert the LITERAL 409.
+  //
+  // car/hyundai/tests/test_hyundai.py reads this ceiling off this line with an ANCHORED regex.
+  // Keep the declaration at the start of a line: an unanchored read takes the first match in
+  // the file, so a stale number in a comment above it would be read instead of the one in
+  // force -- and it fails OPEN, passing while panda drops every frame the car commands.
+  const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_RAISED = HYUNDAI_LIMITS(512, 3, 7);
 
   bool tx = true;
 
@@ -278,7 +293,8 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
     bool steer_req = GET_BIT(msg, 27U);
 
     const TorqueSteeringLimits limits = hyundai_alt_limits_2 ? HYUNDAI_STEERING_LIMITS_ALT_2 :
-                                        hyundai_alt_limits ? HYUNDAI_STEERING_LIMITS_ALT : HYUNDAI_STEERING_LIMITS;
+                                        hyundai_alt_limits ? HYUNDAI_STEERING_LIMITS_ALT :
+                                        hyundai_raised_limits ? HYUNDAI_STEERING_LIMITS_RAISED : HYUNDAI_STEERING_LIMITS;
 
     if (steer_torque_cmd_checks(desired_torque, steer_req, limits)) {
       tx = false;
