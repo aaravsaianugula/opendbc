@@ -72,7 +72,8 @@ def checksum(msg):
 @parameterized_class(LDA_BUTTON)
 class TestHyundaiSafety(HyundaiButtonBase, common.CarSafetyTest, common.DriverTorqueSteeringSafetyTest, common.SteerRequestCutSafetyTest):
   TX_MSGS = [[0x340, 0], [0x4F1, 0], [0x485, 0]]
-  STANDSTILL_THRESHOLD = 12  # 0.375 kph
+  STANDSTILL_THRESHOLD = 0.375 / 3.6  # 0.375 kph, in m/s
+  STANDSTILL_STEP = 0.03125 / 3.6     # exactly one WHL_SPD count, so the probe stays a boundary
   RELAY_MALFUNCTION_ADDRS = {0: (0x340, 0x485)}  # LKAS11
   FWD_BLACKLISTED_ADDRS = {2: [0x340, 0x485]}
 
@@ -125,8 +126,9 @@ class TestHyundaiSafety(HyundaiButtonBase, common.CarSafetyTest, common.DriverTo
     return self.packer.make_can_msg_safety("TCS13", 0, values, fix_checksum=checksum)
 
   def _speed_msg(self, speed):
-    # safety doesn't scale, so undo the scaling
-    values = {"WHL_SPD_%s" % s: speed * 0.03125 for s in ["FL", "FR", "RL", "RR"]}
+    # speed is m/s; WHL_SPD11 carries km/h. The conversion has to be real: the standstill
+    # boundary probes step by exactly one WHL_SPD count (see STANDSTILL_STEP).
+    values = {"WHL_SPD_%s" % s: speed * 3.6 for s in ["FL", "FR", "RL", "RR"]}
     values["WHL_SPD_AliveCounter_LSB"] = (self.cnt_speed % 16) & 0x3
     values["WHL_SPD_AliveCounter_MSB"] = (self.cnt_speed % 16) >> 2
     self.__class__.cnt_speed += 1
