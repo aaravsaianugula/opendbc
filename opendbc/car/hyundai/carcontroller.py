@@ -85,16 +85,19 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
       # Fixed installed package/config only; no arbitrary factory/module import.
       # Startup I/O is outside update(). JSON enables diagnostics, never authority.
       from pathlib import Path
+      import importlib.util
       import sys
       try:
         support = Path(__file__).resolve().parents[4] / ".elantra"
         config = support / "vision_long/native-runtime.json"
         if config.is_file():
-          existing = sys.modules.get("vision_long")
-          if existing is not None and Path(existing.__file__).resolve().parent != support / "vision_long":
-            raise RuntimeError("native_companion_package_collision")
+          # Appended, so nothing in .elantra shadows a module the car process already resolves.
+          # find_spec answers for an imported module too, and imports nothing itself.
           if str(support) not in sys.path:
-            sys.path.insert(0, str(support))
+            sys.path.append(str(support))
+          spec = importlib.util.find_spec("vision_long")
+          if spec is None or spec.origin is None or Path(spec.origin).resolve() != support / "vision_long/__init__.py":
+            raise RuntimeError("native_companion_package_collision")
           from vision_long.native_bootstrap import start_diagnostic_runtime
           self.vision_long_bridge = start_diagnostic_runtime(config)
           self.vision_long_bootstrap_status = self.vision_long_bridge.last_status
@@ -108,25 +111,33 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
   def vision_long_log_state(self):
     """One carlog line (card forwards it to cloudlog) at startup and on every change, never per cycle.
 
-    Authority is reported enabled whenever a consumer is in the SCC12 path, even one that then
-    defers to native, so "disabled" is only ever logged when the companion cannot touch CAN."""
-    state = (self.vision_long_eligible and self.vision_long_consumer is not None, self.vision_long_bootstrap_status)
+    A consumer in the SCC12 path is braking_only: authority=enabled while it may lower a field,
+    authority=latched_native with the fault as the reason once a session fault has latched it to
+    exact native output. "disabled" is only ever logged when the companion cannot touch CAN."""
+    consumer = self.vision_long_consumer if self.vision_long_eligible else None
+    if consumer is None:
+      state = ("diagnostic_only", "disabled", self.vision_long_bootstrap_status)
+    elif consumer.fault_reason is not None:
+      state = ("braking_only", "latched_native", consumer.fault_reason)
+    else:
+      state = ("braking_only", "enabled", self.vision_long_bootstrap_status)
     if state != self.vision_long_logged_state:
       self.vision_long_logged_state = state
-      mode, authority = ("braking_only", "enabled") if state[0] else ("diagnostic_only", "disabled")
-      carlog.warning(f"vision_long_companion mode={mode} authority={authority} reason={state[1]}")
+      mode, authority, reason = state
+      carlog.warning(f"vision_long_companion mode={mode} authority={authority} reason={reason}")
 
   def update(self, CC, CC_SP, CS, now_nanos):
     self.vision_long_boundary = None
     if self.vision_long_bridge is not None:
       self.vision_long_consumer = self.vision_long_bridge.stage_cycle(now_nanos)
       self.vision_long_bootstrap_status = self.vision_long_bridge.last_status
-    self.vision_long_log_state()
     if self.vision_long_consumer is not None and self.vision_long_eligible:
       self.vision_long_boundary = self.vision_long_consumer.begin_cycle(
         now_nanos, long_active=CC.enabled and CC.longActive,
         driver_override=CC.cruiseControl.override or CS.out.brakePressed or CS.out.gasPressed,
         standstill=CS.out.standstill)
+    # After begin_cycle, which is where a clock or return-packet fault latches.
+    self.vision_long_log_state()
     EsccCarController.update(self, CS)
     LeadDataCarController.update(self, CC_SP)
     MadsCarController.update(self, self.CP, CC, CC_SP, self.frame)
