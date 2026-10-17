@@ -1,6 +1,7 @@
 import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs
+from opendbc.car.carlog import carlog
 from opendbc.car.lateral import apply_driver_steer_torque_limits, common_fault_avoidance
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.hyundai import hyundaicanfd, hyundaican
@@ -76,9 +77,11 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     # Offline integration seam: only a separately qualified native bridge may bind this.
     self.vision_long_consumer = None
     self.vision_long_bridge = None
-    self.vision_long_bootstrap_status = "disabled_no_runtime_config"
-    if (self.CP.carFingerprint == CAR.HYUNDAI_ELANTRA_2024 and
-        self.CP.openpilotLongitudinalControl and not self.CP.flags & HyundaiFlags.CANFD):
+    self.vision_long_eligible = bool(self.CP.carFingerprint == CAR.HYUNDAI_ELANTRA_2024 and
+                                     self.CP.openpilotLongitudinalControl and not self.CP.flags & HyundaiFlags.CANFD)
+    self.vision_long_bootstrap_status = ("disabled_no_runtime_config" if self.vision_long_eligible
+                                         else "disabled_not_cn7_openpilot_long_classic_can")
+    if self.vision_long_eligible:
       # Fixed installed package/config only; no arbitrary factory/module import.
       # Startup I/O is outside update(). JSON enables diagnostics, never authority.
       from pathlib import Path
@@ -99,14 +102,27 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
         self.vision_long_bootstrap_status = "native_bootstrap_failed:" + type(error).__name__
     self.vision_long_boundary = None
     self.vision_long_reported_accel = None
+    self.vision_long_logged_state = None
+    self.vision_long_log_state()
+
+  def vision_long_log_state(self):
+    """One carlog line (card forwards it to cloudlog) at startup and on every change, never per cycle.
+
+    Authority is reported enabled whenever a consumer is in the SCC12 path, even one that then
+    defers to native, so "disabled" is only ever logged when the companion cannot touch CAN."""
+    state = (self.vision_long_eligible and self.vision_long_consumer is not None, self.vision_long_bootstrap_status)
+    if state != self.vision_long_logged_state:
+      self.vision_long_logged_state = state
+      mode, authority = ("braking_only", "enabled") if state[0] else ("diagnostic_only", "disabled")
+      carlog.warning(f"vision_long_companion mode={mode} authority={authority} reason={state[1]}")
 
   def update(self, CC, CC_SP, CS, now_nanos):
     self.vision_long_boundary = None
     if self.vision_long_bridge is not None:
       self.vision_long_consumer = self.vision_long_bridge.stage_cycle(now_nanos)
       self.vision_long_bootstrap_status = self.vision_long_bridge.last_status
-    if (self.vision_long_consumer is not None and self.CP.carFingerprint == CAR.HYUNDAI_ELANTRA_2024 and
-        self.CP.openpilotLongitudinalControl and not self.CP.flags & HyundaiFlags.CANFD):
+    self.vision_long_log_state()
+    if self.vision_long_consumer is not None and self.vision_long_eligible:
       self.vision_long_boundary = self.vision_long_consumer.begin_cycle(
         now_nanos, long_active=CC.enabled and CC.longActive,
         driver_override=CC.cruiseControl.override or CS.out.brakePressed or CS.out.gasPressed,
