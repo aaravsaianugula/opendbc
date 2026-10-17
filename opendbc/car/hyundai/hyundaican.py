@@ -132,9 +132,27 @@ def create_lfahda_mfc(packer, enabled, lfa_icon):
   return packer.make_can_msg("LFAHDA_MFC", 0, values)
 
 
+def get_scc12_values(enabled, long_override, use_fca, tuning, ESCC, idx):
+  """Current native command fields, shared with button-only resume arbitration."""
+  scc12_values = {
+    "ACCMode": 2 if enabled and long_override else 1 if enabled else 0,
+    "StopReq": 1 if tuning.stopping else 0,
+    "aReqRaw": tuning.desired_accel,
+    "aReqValue": tuning.actual_accel,
+    "CR_VSM_Alive": idx % 0xF,
+  }
+  if not use_fca:
+    scc12_values["CF_VSM_ConfMode"] = 1
+    scc12_values["AEB_Status"] = 1
+  if ESCC and ESCC.enabled:
+    ESCC.update_scc12(scc12_values)
+  return scc12_values
+
+
 def create_acc_commands(packer, enabled, accel, upper_jerk, idx, lead_data: CanLeadData,
                         hud_control, set_speed, stopping, long_override, use_fca, CP,
-                        main_cruise_enabled, tuning, ESCC: EnhancedSmartCruiseControl | None = None):
+                        main_cruise_enabled, tuning, ESCC: EnhancedSmartCruiseControl | None = None,
+                        vision_long_boundary=None):
   commands = []
 
   def get_scc11_values():
@@ -149,27 +167,6 @@ def create_acc_commands(packer, enabled, accel, upper_jerk, idx, lead_data: CanL
       "ACC_ObjRelSpd": lead_data.lead_rel_speed,
       "ACC_ObjDist": int(lead_data.lead_distance), # close lead makes controls tighter
     }
-
-  def get_scc12_values():
-    scc12_values = {
-      "ACCMode": 2 if enabled and long_override else 1 if enabled else 0,
-      "StopReq": 1 if tuning.stopping else 0,
-      "aReqRaw": tuning.desired_accel,
-      "aReqValue": tuning.actual_accel,  # stock ramps up and down respecting jerk limit until it reaches aReqRaw
-      "CR_VSM_Alive": idx % 0xF,
-    }
-
-    # show AEB disabled indicator on dash with SCC12 if not sending FCA messages.
-    # these signals also prevent a TCS fault on non-FCA cars with alpha longitudinal
-    if not use_fca:
-      scc12_values["CF_VSM_ConfMode"] = 1
-      scc12_values["AEB_Status"] = 1 # AEB disabled
-
-    # Since we have ESCC available, we can update SCC12 with ESCC values.
-    if ESCC and ESCC.enabled:
-      ESCC.update_scc12(scc12_values)
-
-    return scc12_values
 
   def calculate_scc12_checksum(values):
     scc12_dat = packer.make_can_msg("SCC12", 0, values)[1]
@@ -203,9 +200,17 @@ def create_acc_commands(packer, enabled, accel, upper_jerk, idx, lead_data: CanL
   scc11_values = get_scc11_values()
   commands.append(packer.make_can_msg("SCC11", 0, scc11_values))
 
-  scc12_values = get_scc12_values()
-  scc12_values = calculate_scc12_checksum(scc12_values)
-  commands.append(packer.make_can_msg("SCC12", 0, scc12_values))
+  scc12_values = get_scc12_values(enabled, long_override, use_fca, tuning, ESCC, idx)
+  if vision_long_boundary is not None:
+    alternatives = []
+    # Exact native and the companion's braking-only cap; the cap never raises a field.
+    for option in vision_long_boundary.prepare_values(scc12_values):
+      final_values = calculate_scc12_checksum(dict(option))
+      alternatives.append(packer.make_can_msg("SCC12", 0, final_values))
+    commands.append(vision_long_boundary.record_messages(tuple(alternatives)))
+  else:
+    scc12_values = calculate_scc12_checksum(scc12_values)
+    commands.append(packer.make_can_msg("SCC12", 0, scc12_values))
 
   scc14_values = get_scc14_values()
   commands.append(packer.make_can_msg("SCC14", 0, scc14_values))

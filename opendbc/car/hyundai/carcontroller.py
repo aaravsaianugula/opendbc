@@ -73,8 +73,44 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self.car_fingerprint = CP.carFingerprint
     self.last_button_frame = 0
     self.cancel_counter = 0
+    # Offline integration seam: only a separately qualified native bridge may bind this.
+    self.vision_long_consumer = None
+    self.vision_long_bridge = None
+    self.vision_long_bootstrap_status = "disabled_no_runtime_config"
+    if (self.CP.carFingerprint == CAR.HYUNDAI_ELANTRA_2024 and
+        self.CP.openpilotLongitudinalControl and not self.CP.flags & HyundaiFlags.CANFD):
+      # Fixed installed package/config only; no arbitrary factory/module import.
+      # Startup I/O is outside update(). JSON enables diagnostics, never authority.
+      from pathlib import Path
+      import sys
+      try:
+        support = Path(__file__).resolve().parents[4] / ".elantra"
+        config = support / "vision_long/native-runtime.json"
+        if config.is_file():
+          existing = sys.modules.get("vision_long")
+          if existing is not None and Path(existing.__file__).resolve().parent != support / "vision_long":
+            raise RuntimeError("native_companion_package_collision")
+          if str(support) not in sys.path:
+            sys.path.insert(0, str(support))
+          from vision_long.native_bootstrap import start_diagnostic_runtime
+          self.vision_long_bridge = start_diagnostic_runtime(config)
+          self.vision_long_bootstrap_status = self.vision_long_bridge.last_status
+      except Exception as error:
+        self.vision_long_bootstrap_status = "native_bootstrap_failed:" + type(error).__name__
+    self.vision_long_boundary = None
+    self.vision_long_reported_accel = None
 
   def update(self, CC, CC_SP, CS, now_nanos):
+    self.vision_long_boundary = None
+    if self.vision_long_bridge is not None:
+      self.vision_long_consumer = self.vision_long_bridge.stage_cycle(now_nanos)
+      self.vision_long_bootstrap_status = self.vision_long_bridge.last_status
+    if (self.vision_long_consumer is not None and self.CP.carFingerprint == CAR.HYUNDAI_ELANTRA_2024 and
+        self.CP.openpilotLongitudinalControl and not self.CP.flags & HyundaiFlags.CANFD):
+      self.vision_long_boundary = self.vision_long_consumer.begin_cycle(
+        now_nanos, long_active=CC.enabled and CC.longActive,
+        driver_override=CC.cruiseControl.override or CS.out.brakePressed or CS.out.gasPressed,
+        standstill=CS.out.standstill)
     EsccCarController.update(self, CS)
     LeadDataCarController.update(self, CC_SP)
     MadsCarController.update(self, self.CP, CC, CC_SP, self.frame)
@@ -137,14 +173,42 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
                                             stopping, hud_control, actuators, CS, CC))
 
     # Intelligent Cruise Button Management
-    can_sends.extend(IntelligentCruiseButtonManagementInterface.update(self, CS, CC_SP, self.packer, self.frame, self.last_button_frame, self.CAN))
+    icbm_messages = IntelligentCruiseButtonManagementInterface.update(self, CS, CC_SP, self.packer, self.frame, self.last_button_frame, self.CAN)
+    can_sends.extend(icbm_messages)
+    automatic_resume_messages = (
+      tuple(icbm_messages)
+      if CC_SP.intelligentCruiseButtonManagement.sendButton == structs.IntelligentCruiseButtonManagement.SendButtonState.increase
+      else ())
 
     new_actuators = actuators.as_builder()
     new_actuators.torque = apply_torque / self.params.STEER_MAX
     new_actuators.torqueOutputCan = apply_torque
     new_actuators.accel = self.tuning.actual_accel
+    boundary = self.vision_long_boundary
+    if self.frame % 2 == 0:
+      self.vision_long_reported_accel = None
+      if boundary is not None and boundary.prepared is not None:
+        boundary.prepare_handoff(new_actuators, can_sends, automatic_resume_messages)
+    elif self.vision_long_reported_accel is not None:
+      new_actuators.accel = self.vision_long_reported_accel
+    # A packet staged on a tick without SCC12 is kept by the consumer, not lost:
+    # the next prepare_values (SCC12 or resume-button tick) consumes it.
+    sent_scc12 = self.frame % 2 == 0
+    if not sent_scc12 and boundary is not None and automatic_resume_messages:
+      # No CAN command is synthesized on this tick. Use the same current native
+      # fields only to finalize permission for the generated automatic buttons.
+      boundary.prepare_values(hyundaican.get_scc12_values(
+        CC.enabled, CC.cruiseControl.override, self.CP.flags & HyundaiFlags.USE_FCA.value,
+        self.tuning, self.ESCC, int(self.frame / 2)))
+      boundary.prepare_resume_handoff(new_actuators, can_sends, automatic_resume_messages)
 
     self.frame += 1
+    # All CAN checksums/packing and actuator alternatives precede acceptance.
+    # Publication/OS queue and physical CAN-delivery timing remain unqualified.
+    if boundary is not None and boundary.prepared is not None:
+      new_actuators, can_sends = boundary.finalize_handoff()
+      if sent_scc12 and boundary.decision.companion_eligible:
+        self.vision_long_reported_accel = boundary.output["aReqValue"]
     return new_actuators, can_sends
 
   def create_can_msgs(self, apply_steer_req, apply_torque, torque_fault, set_speed_in_units, accel, stopping, hud_control, actuators, CS, CC):
@@ -179,7 +243,8 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
       can_sends.extend(hyundaican.create_acc_commands(self.packer, CC.enabled, accel, jerk, int(self.frame / 2),
                                                       self.lead_data, hud_control, set_speed_in_units, stopping,
                                                       CC.cruiseControl.override, use_fca, self.CP,
-                                                      CS.main_cruise_enabled, self.tuning, self.ESCC))
+                                                      CS.main_cruise_enabled, self.tuning, self.ESCC,
+                                                      vision_long_boundary=self.vision_long_boundary))
 
     # 20 Hz LFA MFA message
     if self.frame % 5 == 0 and self.CP.flags & HyundaiFlags.SEND_LFA.value:
