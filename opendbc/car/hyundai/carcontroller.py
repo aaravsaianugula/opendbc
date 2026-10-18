@@ -86,6 +86,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
       # outside update(). Authority follows the braking toggle and the declared contract only.
       from pathlib import Path
       import importlib.util
+      import re
       import sys
       try:
         support = Path(__file__).resolve().parents[4] / ".elantra"
@@ -105,8 +106,10 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
         if self.vision_long_bridge is not None:
           self.vision_long_bridge.stop()
           self.vision_long_bridge = None
+        # One status-line token, as native_bootstrap._reason makes them, and without "=": no
+        # newline or key=value from an exception message can forge a second line or field.
         self.vision_long_bootstrap_status = ("native_bootstrap_failed:" + type(error).__name__ + ":" +
-                                             str(error)[:96].replace(" ", "_"))
+                                             re.sub(r"[^A-Za-z0-9_:.;-]", "_", str(error)[:96]))
     self.vision_long_boundary = None
     self.vision_long_reported_accel = None
     self.vision_long_logged_state = None
@@ -138,11 +141,12 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
       vision_long_now = self.vision_long_bridge.cycle_now()
       self.vision_long_consumer = self.vision_long_bridge.stage_cycle(vision_long_now)
       self.vision_long_bootstrap_status = self.vision_long_bridge.last_status
-    if self.vision_long_consumer is not None and self.vision_long_eligible:
-      self.vision_long_boundary = self.vision_long_consumer.begin_cycle(
-        vision_long_now, long_active=CC.enabled and CC.longActive,
-        driver_override=CC.cruiseControl.override or CS.out.brakePressed or CS.out.gasPressed,
-        standstill=CS.out.standstill)
+      # Only a bridge stages a consumer, so the cycle clock is read only where it is bound.
+      if self.vision_long_consumer is not None and self.vision_long_eligible:
+        self.vision_long_boundary = self.vision_long_consumer.begin_cycle(
+          vision_long_now, long_active=CC.enabled and CC.longActive,
+          driver_override=CC.cruiseControl.override or CS.out.brakePressed or CS.out.gasPressed,
+          standstill=CS.out.standstill)
     # After begin_cycle, which is where a clock or return-packet fault latches.
     self.vision_long_log_state()
     EsccCarController.update(self, CS)
