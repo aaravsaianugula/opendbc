@@ -74,7 +74,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self.car_fingerprint = CP.carFingerprint
     self.last_button_frame = 0
     self.cancel_counter = 0
-    # Offline integration seam: only a separately qualified native bridge may bind this.
+    # Vision Long companion seam: bound only by the native_runtime_v2 config below.
     self.vision_long_consumer = None
     self.vision_long_bridge = None
     self.vision_long_eligible = bool(self.CP.carFingerprint == CAR.HYUNDAI_ELANTRA_2024 and
@@ -82,8 +82,8 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self.vision_long_bootstrap_status = ("disabled_no_runtime_config" if self.vision_long_eligible
                                          else "disabled_not_cn7_openpilot_long_classic_can")
     if self.vision_long_eligible:
-      # Fixed installed package/config only; no arbitrary factory/module import.
-      # Startup I/O is outside update(). JSON enables diagnostics, never authority.
+      # Fixed installed package/config only; no arbitrary factory/module import. Startup I/O is
+      # outside update(). Authority follows the braking toggle and the declared contract only.
       from pathlib import Path
       import importlib.util
       import sys
@@ -98,11 +98,15 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
           spec = importlib.util.find_spec("vision_long")
           if spec is None or spec.origin is None or Path(spec.origin).resolve() != support / "vision_long/__init__.py":
             raise RuntimeError("native_companion_package_collision")
-          from vision_long.native_bootstrap import start_diagnostic_runtime
-          self.vision_long_bridge = start_diagnostic_runtime(config)
+          from vision_long.native_bootstrap import start_native_runtime
+          start_native_runtime(self, config)
           self.vision_long_bootstrap_status = self.vision_long_bridge.last_status
       except Exception as error:
-        self.vision_long_bootstrap_status = "native_bootstrap_failed:" + type(error).__name__
+        if self.vision_long_bridge is not None:
+          self.vision_long_bridge.stop()
+          self.vision_long_bridge = None
+        self.vision_long_bootstrap_status = ("native_bootstrap_failed:" + type(error).__name__ + ":" +
+                                             str(error)[:96].replace(" ", "_"))
     self.vision_long_boundary = None
     self.vision_long_reported_accel = None
     self.vision_long_logged_state = None
@@ -111,16 +115,16 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
   def vision_long_log_state(self):
     """One carlog line (card forwards it to cloudlog) at startup and on every change, never per cycle.
 
-    A consumer in the SCC12 path is braking_only: authority=enabled while it may lower a field,
-    authority=latched_native with the fault as the reason once a session fault has latched it to
-    exact native output. "disabled" is only ever logged when the companion cannot touch CAN."""
-    consumer = self.vision_long_consumer if self.vision_long_eligible else None
-    if consumer is None:
+    Without a bound runtime: mode=diagnostic_only authority=disabled with the bootstrap status.
+    With one, the binding answers: toggle OFF is mode=observe authority=disabled
+    reason=braking_toggle_off; ON with an admitted session is mode=braking_only authority=enabled
+    reason=braking_toggle_on; a card-lifetime fault latch is authority=latched_native reason=<fault>;
+    ON without a session is authority=disabled with the bridge/publisher status as the reason."""
+    binding = self.vision_long_bridge if self.vision_long_eligible else None
+    if binding is None:
       state = ("diagnostic_only", "disabled", self.vision_long_bootstrap_status)
-    elif consumer.fault_reason is not None:
-      state = ("braking_only", "latched_native", consumer.fault_reason)
     else:
-      state = ("braking_only", "enabled", self.vision_long_bootstrap_status)
+      state = binding.status_state(self.vision_long_consumer)
     if state != self.vision_long_logged_state:
       self.vision_long_logged_state = state
       mode, authority, reason = state
@@ -129,11 +133,14 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
   def update(self, CC, CC_SP, CS, now_nanos):
     self.vision_long_boundary = None
     if self.vision_long_bridge is not None:
-      self.vision_long_consumer = self.vision_long_bridge.stage_cycle(now_nanos)
+      # The companion's cycle clock is CLOCK_BOOTTIME (the camera SOF domain), never card's
+      # CLOCK_MONOTONIC now_nanos; the completion clock reads the same domain at finalize.
+      vision_long_now = self.vision_long_bridge.cycle_now()
+      self.vision_long_consumer = self.vision_long_bridge.stage_cycle(vision_long_now)
       self.vision_long_bootstrap_status = self.vision_long_bridge.last_status
     if self.vision_long_consumer is not None and self.vision_long_eligible:
       self.vision_long_boundary = self.vision_long_consumer.begin_cycle(
-        now_nanos, long_active=CC.enabled and CC.longActive,
+        vision_long_now, long_active=CC.enabled and CC.longActive,
         driver_override=CC.cruiseControl.override or CS.out.brakePressed or CS.out.gasPressed,
         standstill=CS.out.standstill)
     # After begin_cycle, which is where a clock or return-packet fault latches.
