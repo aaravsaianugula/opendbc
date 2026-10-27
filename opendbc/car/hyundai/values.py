@@ -109,8 +109,40 @@ class CarControllerParams:
       # branch is what guarantees that. Assigned after the chain instead, RAISED_LIMITS would
       # silently outrank CANFD, the 255 list, ALT_LIMITS and ALT_LIMITS_2 -- a car carrying
       # both flags would command 409 while panda enforced 170.
+      #
+      # THE BRANCH CHANGES TWO NUMBERS AND THEY ARE A PAIR. The ceiling decides how much torque
+      # the car may ask for; the driver allowance decides how much of it survives contact with
+      # the column-torque sensor. Raising one alone leaves most of the other on the table.
+      #
+      # STEER_DRIVER_ALLOWANCE 50 -> 100, for the same reason as the ceiling: measured behaviour
+      # of THIS car, not a preference. CR_Mdps_StrColTq is the COLUMN torque, and on the CN7 it
+      # reads the EPS's own reaction against road load, not just the driver. On straight-line,
+      # hands-off, engaged frames it rises with openpilot's own command -- median 11 counts at
+      # 0-20 applied, 53 at 120-200, 83 at 200-300 -- and it OPPOSES the command on 70-83% of
+      # frames above 120 counts, the opposing magnitude falling monotonically with speed (114
+      # counts at 2-3 m/s down to 26 at 18-25). That is road load, not hands.
+      #
+      # apply_driver_steer_torque_limits cuts the ceiling by twice the excess over the
+      # allowance, so at 50 the car throttles itself back on a signal nobody generated: across
+      # 3.42M engaged frames the effective ceiling falls below 350 counts on 32-46% of hands-off
+      # frames under 10 m/s, and to ~200 at the 10th percentile. Replayed through opendbc's own
+      # limiter, 100 delivers +15.0% mean applied counts over 3-14 m/s and +27.2% at 1-3 m/s.
+      #
+      # 100 IS INSIDE WHAT PANDA ALREADY ENFORCES, so this needs no reflash. panda runs the same
+      # clamp shape (TorqueDriverLimited, allowance 50, multiplier 2) against max_torque 512
+      # rather than opendbc's 409, so its window is 103 counts wider at every driver torque.
+      # Solving 409 + (A + d)*2 <= 512 + (50 + d)*2 for all d gives A <= 101.5, so 101 is the
+      # largest value that stays strictly inside panda and 100 leaves a count of margin.
+      # .elantra/test_ceiling_replay.py proves that bound exact against opendbc's own limiter
+      # and panda's own constants: 101 never exceeds panda, 102 does.
+      #
+      # WHAT IT COSTS: the car yields to a real hand later. Full yield moves from -254.5 to
+      # -304.5 counts of driver torque. STEER_THRESHOLD (steeringPressed) is unchanged at 150,
+      # so openpilot still notices a held wheel at the same point; it just stops backing off so
+      # early on torque the driver never applied.
       if CP.flags & HyundaiFlags.RAISED_LIMITS:
         self.STEER_MAX = 409
+        self.STEER_DRIVER_ALLOWANCE = 100
 
 
 class HyundaiSafetyFlags(IntFlag):
